@@ -1,0 +1,63 @@
+# Builds switchback.exe from this repository and publishes it as a release.
+# Starts when a version tag (v0.7.1) is pushed. Nothing from a developer's computer gets into the program.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+
+      - name: The tag is the version written in the code
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -qx "VERSION=$v" install.sh || { echo "install.sh has another version than tag $GITHUB_REF_NAME"; exit 1; }
+          grep -q "const appVersion = \"$v\"" app/app.go || { echo "app.go has another version than tag $GITHUB_REF_NAME"; exit 1; }
+
+      - name: Install Wails (the version from go.mod)
+        shell: bash
+        run: |
+          w=$(awk '$1 == "github.com/wailsapp/wails/v2" {print $2}' app/go.mod)
+          go install "github.com/wailsapp/wails/v2/cmd/wails@$w"
+
+      - name: Build
+        working-directory: app
+        run: wails build -clean -trimpath
+
+      - name: Files of the release
+        shell: bash
+        run: |
+          mkdir out
+          cp app/build/bin/switchback.exe docs/guide.html out/
+          cd out
+          sha256sum switchback.exe guide.html > SHA256.txt
+          cat SHA256.txt
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          {
+            echo "**Скачать:** \`switchback.exe\` — программа для Windows, \`guide.html\` — инструкция (откройте в браузере)."
+            echo
+            echo "Программа собрана автоматически из кода этого репозитория. Она не подписана платным сертификатом,"
+            echo "поэтому Windows может предупредить о «неизвестном издателе»."
+            echo
+            echo "Контрольные суммы файлов — в \`SHA256.txt\`."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" out/switchback.exe out/guide.html out/SHA256.txt \
+            --title "switchback $v" --notes-file notes.md

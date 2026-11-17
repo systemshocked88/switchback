@@ -1,0 +1,50 @@
+# Runs the automatic tests on GitHub machines after every push. Nothing here touches a real router:
+# the installer is run against fake Keenetic/OpenWrt folders, the program against a fake SSH server.
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: installer (Linux, dash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tests/run.sh
+        run: |
+          sh tests/run.sh > out.txt 2>&1 && rc=0 || rc=$?
+          tail -n 60 out.txt
+          # failed checks are also shown as an annotation of the run (readable without the full log)
+          if [ "$rc" != 0 ]; then
+            msg=$(grep -E 'FAIL|Тесты:' out.txt | head -n 60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=tests/run.sh::$msg"
+          fi
+          exit "$rc"
+
+  app:
+    name: program (Windows, go test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+      - name: go test
+        shell: bash
+        working-directory: app
+        run: |
+          go generate ./...
+          go test ./... > out.txt 2>&1 && rc=0 || rc=$?
+          tail -n 60 out.txt
+          if [ "$rc" != 0 ]; then
+            msg=$(grep -E '^(---|FAIL|ok|panic)' out.txt | head -n 60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=go test::$msg"
+          fi
+          exit "$rc"

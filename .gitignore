@@ -1,0 +1,4 @@
+# Built program and files Wails generates on each build
+app/build/bin/
+app/frontend/wailsjs/
+app/installer/

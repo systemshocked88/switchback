@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "switchback",
+  "outputfilename": "switchback",
+  "frontend:dir": "frontend",
+  "frontend:install": "",
+  "frontend:build": "",
+  "preBuildHooks": {
+    "*/*": "go run ../../tools/bundle"
+  },
+  "author": {
+    "name": "switchback"
+  },
+  "info": {
+    "productName": "switchback",
+    "productVersion": "0.7.5",
+    "comments": "Настройка обхода блокировок на домашнем роутере"
+  }
+}

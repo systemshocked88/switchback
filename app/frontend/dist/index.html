@@ -1,0 +1,1419 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>switchback</title>
+<style>
+  :root { --bg:#181a1f; --card:#22252c; --line:#30343c; --text:#e6e6e6; --muted:#9aa0a6;
+          --ok:#4fb37c; --warn:#e0b341; --bad:#e5604f; --info:#5aa9e6; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width:640px; margin:32px auto; padding:0 16px 32px; }
+  header { display:flex; align-items:baseline; gap:12px; margin-bottom:20px; }
+  h1 { font-size:26px; margin:0; }
+  .sub { color:var(--muted); }
+  .card { background:var(--card); border-radius:10px; padding:20px; margin-bottom:16px; }
+  .card h2 { font-size:17px; margin:0 0 12px; }
+  label { display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
+  .row { display:flex; gap:12px; } .row > div { flex:1; } .row > .narrow { flex:0 0 96px; }
+  input { width:100%; padding:9px 11px; border-radius:6px; border:1px solid #3a3f48; background:#1b1d22; color:var(--text); font:inherit; }
+  button { padding:10px 16px; border:0; border-radius:6px; font:600 15px "Segoe UI", sans-serif; cursor:pointer; }
+  button.primary { background:var(--ok); color:#0d1f15; }
+  button.secondary { background:#343841; color:var(--text); }
+  button:disabled { opacity:.5; cursor:default; }
+  .buttons { display:flex; gap:10px; margin-top:18px; flex-wrap:wrap; }
+  .buttons .wide { flex:1; }
+  .note { color:var(--muted); font-size:13px; margin:10px 0 0; }
+  .msg { margin-top:12px; padding:10px 12px; border-radius:6px; font-size:14px; display:none; overflow-wrap:anywhere; }
+  .item span:last-child { overflow-wrap:anywhere; }
+  .msg.show { display:block; }
+  .msg.err { background:rgba(229,96,79,.12); color:#f3a79c; }
+  .msg.info { background:rgba(90,169,230,.12); color:#a9d2f3; }
+  .hidden { display:none !important; }
+  .status { display:flex; align-items:center; gap:10px; color:var(--muted); }
+  .spinner { width:16px; height:16px; border:2px solid #444; border-top-color:var(--ok); border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .verdict { padding:14px 16px; border-radius:8px; font-weight:600; margin-bottom:16px; }
+  .verdict.v0 { background:rgba(79,179,124,.14); color:#8fdcae; }
+  .verdict.v1 { background:rgba(224,179,65,.14); color:#ecd08a; }
+  .verdict.v2 { background:rgba(229,96,79,.14); color:#f3a79c; }
+  .verdict.vnone { background:#2a2d34; color:var(--muted); font-weight:500; }
+  .group { margin-top:14px; font-weight:600; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.04em; }
+  .item { display:flex; gap:10px; padding:5px 0; border-bottom:1px solid var(--line); }
+  .item:last-child { border-bottom:0; }
+  .icon { width:18px; flex:0 0 18px; text-align:center; font-weight:700; }
+  .i-ok { color:var(--ok); } .i-warn { color:var(--warn); } .i-bad { color:var(--bad); } .i-skip, .i-dry { color:var(--muted); }
+  details { margin-top:8px; } summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  pre { background:#121317; border-radius:6px; padding:10px; max-height:260px; overflow:auto; font:12px/1.45 Consolas, monospace; white-space:pre-wrap; }
+  footer { color:var(--muted); font-size:12px; text-align:center; margin-top:8px; }
+  .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .tab { background:#2c3038; color:var(--text); border:1px solid #3a3f48; font-weight:500; }
+  .tab.on { background:rgba(79,179,124,.18); border-color:var(--ok); color:#bfe9cf; }
+  .req-title { margin:16px 0 4px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .req { display:flex; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .req:last-child { border-bottom:0; }
+  .req input { width:18px; height:18px; flex:0 0 18px; margin-top:2px; accent-color:var(--ok); }
+  .req .t { font-weight:500; }
+  .req details { margin-top:2px; } .req details div { color:var(--muted); font-size:13px; margin-top:4px; }
+  .link { background:none; border:0; padding:0; color:var(--info); font:inherit; font-size:13px; cursor:pointer; text-decoration:underline; }
+  .warnbox { background:rgba(224,179,65,.12); color:#ecd08a; padding:12px; border-radius:6px; font-size:14px; margin-top:12px; }
+  select { width:100%; padding:9px 11px; border-radius:6px; border:1px solid #3a3f48; background:#1b1d22; color:var(--text); font:inherit; }
+  .profile { display:flex; gap:10px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px; cursor:pointer; }
+  .profile.on { border-color:var(--ok); background:rgba(79,179,124,.08); }
+  .profile input { accent-color:var(--ok); margin-top:4px; width:18px; height:18px; flex:0 0 18px; padding:0; }
+  .profile .d { color:var(--muted); font-size:13px; }
+  .rec { color:var(--ok); font-size:12px; margin-left:6px; }
+  .setblock { margin-bottom:8px; }
+  .svc { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:8px; }
+  .bar { height:6px; background:#2c3038; border-radius:3px; overflow:hidden; margin-bottom:12px; }
+  .bar div { height:100%; width:0; background:var(--ok); transition:width .3s; }
+  .stephead { margin-top:12px; font-weight:600; }
+  .stephead .r { font-weight:400; color:var(--muted); margin-left:6px; }
+  .steps { padding-left:20px; } .steps li { margin-bottom:10px; }
+  .dev { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:8px; }
+  .dev .d { color:var(--muted); font-size:13px; }
+  .help { list-style:none; margin:10px 0 0; padding:0; font-size:13px; color:var(--muted); }
+  .help li { padding:3px 0; }
+  .help b { color:var(--text); font-weight:600; }
+  .tag { display:inline-block; font-size:11px; padding:0 6px; border-radius:4px; margin-right:6px; vertical-align:1px; }
+  .tag.safe { background:rgba(79,179,124,.16); color:#8fdcae; }
+  .tag.change { background:rgba(224,179,65,.16); color:#ecd08a; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>switchback</h1><span class="sub">настройка обхода блокировок на роутере</span></header>
+
+  <!-- Screen 0: what is needed beforehand -->
+  <section id="scr-prereq" class="card hidden">
+    <h2>Что нужно заранее</h2>
+    <div id="det-status" class="status hidden" style="margin:0 0 10px"><div class="spinner"></div><span>Ищу роутер в домашней сети…</span></div>
+    <div id="det-msg" class="msg" style="margin:0 0 12px"></div>
+    <p class="note" style="margin:0 0 12px">Какая прошивка на роутере? <button class="link" id="btn-detect" title="спрашивает роутер в домашней сети, какой он модели (без пароля). Роутер не меняется.">Определить автоматически</button></p>
+    <div class="tabs">
+      <button class="tab" data-fw="keenetic">Keenetic / Netcraze</button>
+      <button class="tab" data-fw="openwrt">OpenWrt</button>
+      <button class="tab" data-fw="other">Другая / не знаю</button>
+    </div>
+    <div id="req-list"></div>
+    <div class="buttons">
+      <button id="btn-ew-open" class="primary wide hidden" data-help="открывает экран подготовки: программа проверит роутер и флешку, поставит Entware и задаст пароль. Сам переход ничего не меняет.">Продолжить: подготовить роутер</button>
+      <button id="btn-ready" class="primary wide" disabled data-help="переход к подключению. С роутером пока ничего не происходит.">Продолжить — подключиться</button>
+    </div>
+    <p class="note" id="ready-note"></p>
+  </section>
+
+  <!-- Screen 1: connection -->
+  <section id="scr-connect" class="card hidden">
+    <h2>Подключение к роутеру</h2>
+    <div class="row">
+      <div><label for="host">Адрес роутера</label><input id="host" value="192.168.1.1" spellcheck="false"></div>
+      <div class="narrow"><label for="port">Порт SSH</label><input id="port" value="22" inputmode="numeric"></div>
+    </div>
+    <label for="user">Пользователь</label>
+    <input id="user" value="root" spellcheck="false">
+    <label for="pass">Пароль</label>
+    <input id="pass" type="password" autocomplete="off">
+    <p class="note">Пароль нужен только для входа и нигде не сохраняется. Анализ ничего не меняет на роутере.</p>
+    <p class="note">Keenetic: если пароль верный, а войти не получается, поставьте порт <b>222</b> — так бывает, когда в роутере
+      включён его собственный SSH-сервер.</p>
+    <div class="buttons">
+      <button id="btn-connect" class="primary wide" data-help="входит на роутер и проверяет, подходит ли он. Программа копируется во временную папку роутера (исчезнет после перезагрузки), настройки не меняются.">Подключиться и проверить роутер</button>
+      <button id="btn-forget" class="secondary hidden" data-help="нужна, если роутер сбрасывали и программа отказалась подключаться. Забывает его старый ключ только на этом компьютере.">Забыть ключ</button>
+    </div>
+    <p class="note"><button class="link" id="btn-prereq">Что нужно заранее (флешка, Entware, пароль…)</button></p>
+    <div id="connect-status" class="status hidden" style="margin-top:14px"><div class="spinner"></div><span>Подключаюсь…</span></div>
+    <div id="connect-msg" class="msg"></div>
+  </section>
+
+  <!-- Screen 2: analysis -->
+  <section id="scr-analyze" class="hidden">
+    <div class="card">
+      <h2>Анализ роутера</h2>
+      <div id="key-note" class="msg info"></div>
+      <div id="an-status" class="status" style="margin:12px 0"><div class="spinner"></div><span id="an-status-text">Копирую установщик на роутер…</span></div>
+      <div id="verdict" class="verdict hidden"></div>
+      <div id="upd-an" class="warnbox hidden" style="margin:0 0 14px">
+        <div class="upd-text"></div>
+        <div class="buttons" style="margin-top:10px"><button id="btn-upd-an" class="primary" data-change="1" data-help="заменяет скрипты switchback на роутере новыми и добавляет новые функции. Ваши настройки не меняются. Нужно нажать два раза.">Обновить switchback на роутере</button></div>
+        <div class="msg"></div>
+      </div>
+      <div id="fw-box" class="hidden" style="margin:0 0 14px">
+        <div id="fw-text" class="msg show info" style="margin:0"></div>
+        <p class="note"><button class="link hidden" id="fw-link">Открыть выбор прошивки для этой модели</button></p>
+      </div>
+      <div id="items"></div>
+      <div id="an-msg" class="msg err"></div>
+      <details><summary>Подробный журнал</summary><pre id="log"></pre></details>
+      <div class="buttons">
+        <button id="btn-next" class="primary wide" disabled data-help="выбор, что установить. Пока ничего не ставится.">Далее: что ставить</button>
+        <button id="btn-again" class="secondary" disabled data-help="повторяет проверку роутера.">Проверить ещё раз</button>
+        <button id="btn-status" class="secondary" data-help="показывает, что уже установлено и работает ли. Там же отчёт и откат.">Статус и откат</button>
+        <button id="btn-disconnect" class="secondary" data-help="закрывает соединение с роутером.">Отключиться</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Screen 3: what to install -->
+  <section id="scr-modules" class="card hidden">
+    <h2>Что установить</h2>
+    <div id="profiles"></div>
+    <div id="custom-box" class="hidden" style="margin:4px 0 0 30px"></div>
+    <div id="mod-note" class="msg info"></div>
+    <div class="buttons">
+      <button id="btn-quick" class="primary wide hidden" data-change="1" data-help="ставит обход для YouTube и Discord с обычными настройками. Нужно нажать два раза: второй — подтверждение. При сбое всё откатится само, а позже можно убрать кнопкой «Откатить всё».">Установить</button>
+      <button id="btn-to-settings" class="primary wide" data-help="настройки выбранного. Пока ничего не ставится.">Далее: настройки</button>
+      <button class="secondary" data-go="analyze">Назад</button>
+    </div>
+  </section>
+
+  <!-- Screen 4: settings -->
+  <section id="scr-settings" class="card hidden">
+    <h2>Настройки</h2>
+    <div id="set-zapret" class="setblock">
+      <div class="group">zapret</div>
+      <div id="set-zapret-keenetic">
+        <label for="policy">Политика доступа для исключения (если на каком-то ПК работает свой обход)</label>
+        <input id="policy" placeholder="например, nfqws — или оставьте пустым" spellcheck="false">
+        <p class="note">Два обхода на одном трафике ломают соединения. Устройства в этой политике zapret на роутере не трогает.
+          Создать политику: Сетевые правила → Политики доступа.</p>
+      </div>
+      <label class="req" style="border:0">
+        <input type="checkbox" id="noquic" checked>
+        <div><div class="t">Запретить устройствам дома QUIC (UDP 443)</div>
+          <div class="note" style="margin:0">Иначе приложение YouTube на телевизоре, приставке и телефоне может не грузить видео: провайдер замечает такой запрос
+            и на время глушит сервер целиком. Сайты и приложения сами перейдут на обычное соединение. Снимите галочку, если дома есть свой VPN через UDP 443.</div></div>
+      </label>
+      <label id="set-zapret-openwrt" class="req" style="border:0">
+        <input type="checkbox" id="offload" checked>
+        <div><div class="t">Выключить ускорение (flow offloading)</div>
+          <div class="note" style="margin:0">С ним zapret не работает. На гигабитных тарифах скорость может немного снизиться.</div></div>
+      </label>
+    </div>
+    <div id="set-dns" class="setblock">
+      <div class="group">DNS для ChatGPT и Claude</div>
+      <p class="note" id="dns-hint"></p>
+      <div id="dns-services"></div>
+    </div>
+    <div id="set-vpn" class="setblock">
+      <div class="group">Telegram через VPN</div>
+      <div id="vpn-none" class="warnbox hidden">На роутере нет подключения WireGuard. Подключите его кнопкой ниже из файла
+        .conf от VPN-сервиса — иначе этот модуль будет пропущен.</div>
+      <div id="vpn-pick"><label for="vpn">Через какое подключение пускать Telegram</label><select id="vpn"></select></div>
+      <div class="buttons" style="margin-top:10px">
+        <button id="btn-wg-spare" class="secondary hidden" data-change="1" data-help="ещё один конфиг (другой сервер или слот) как запасной: создаётся выключенным, проверяется трафиком, автосмена включит его, если основной перестанет работать.">Добавить запасной туннель</button>
+        <button id="btn-wg" class="secondary" data-change="1" data-help="выберите файл .conf от VPN-сервиса — на роутере сразу появится новое подключение WireGuard (только для Telegram). Убирается кнопкой «Откатить всё».">Подключить WireGuard из файла .conf</button>
+      </div>
+      <p class="note">Файл от VPN-сервиса уйдёт только на роутер; копия удаляется сразу после чтения, ключи нигде не показываются.
+        Подключение будет только для адресов Telegram, не для всего интернета. После создания программа проверит туннель
+        настоящим трафиком: «рукопожатие» с сервером ещё не значит, что через него что-то открывается.</p>
+      <div class="svc" style="margin-top:8px">
+        <div class="t">Где взять конфиг WireGuard</div>
+        <div class="note" style="margin:4px 0 0">Подойдёт любой VPN-сервис, который выдаёт файлы WireGuard (.conf) для роутера.
+          Удобно, например, в Telegram-боте <b>ZapretKVN</b>: там конфиги выдаются прямо в чате (им пользуется автор switchback).
+          Берите сервер с выходом за границей (Европа, США): с российским выходом Telegram откроется, а Instagram — нет.
+          Можно добавить несколько конфигов от разных серверов: запасные включит автосмена, если основной перестанет работать.</div>
+      </div>
+      <div id="wg-items"></div>
+      <div id="wg-scale" style="margin:10px 0 4px">
+        <div style="height:6px;border-radius:3px;background:#333;overflow:hidden"><div id="wg-scale-bar" style="height:100%;width:0"></div></div>
+        <div id="wg-scale-text" class="note" style="margin:4px 0 0"></div>
+      </div>
+      <div id="wg-msg" class="msg"></div>
+      <label id="set-meta" class="req" style="border:0;margin-top:8px">
+        <input type="checkbox" id="meta-on" checked>
+        <div><div class="t">Instagram, Facebook, WhatsApp и Threads — тоже через VPN</div>
+          <div class="note" style="margin:0">Их сети и DNS пойдут через тот же туннель, что Telegram. Приложения Instagram и WhatsApp так работают надёжнее, чем через zapret.</div></div>
+      </label>
+    </div>
+    <div id="set-failover" class="setblock">
+      <div class="group">Автосмена VPN-туннеля</div>
+      <label for="fo-list">Туннели по порядку: первый — основной, остальные — запасные</label>
+      <input id="fo-list" spellcheck="false">
+      <p class="note">Если основной перестанет пропускать трафик, маршруты сами переедут на первый работающий запасной.
+        Запасные держатся выключенными. Нужно хотя бы два туннеля WireGuard.</p>
+    </div>
+    <div id="set-watchdog" class="setblock">
+      <div class="group">Сторож и бэкап</div>
+      <label for="token">Токен Telegram-бота (от @BotFather)</label>
+      <div class="row"><div><input id="token" type="password" autocomplete="off" spellcheck="false"></div>
+        <div style="flex:0 0 auto"><button id="btn-bot" class="secondary" data-help="проверяет токен с этого компьютера и находит ваш чат с ботом. Роутер не трогает.">Проверить</button></div></div>
+      <div id="bot-msg" class="msg"></div>
+      <p class="note">Токен уйдёт только на роутер, в файл, который читает лишь администратор. Программа его не сохраняет.
+        Бот можно не делать, если включён ntfy ниже: тогда уведомления придут только туда, а команд (/status и др.) не будет.</p>
+      <label class="req" style="border:0;margin-top:6px">
+        <input type="checkbox" id="ntfy-on" checked>
+        <div><div class="t">Запасной канал уведомлений — ntfy (рекомендуется)</div>
+          <div class="note" style="margin:0">Telegram у вас идёт через VPN: если туннель упадёт, сообщение о поломке туда не дойдёт. Тогда оно придёт
+            push-уведомлением в приложение ntfy — оно работает напрямую, без VPN.</div></div>
+      </label>
+      <div id="ntfy-box" class="svc">
+        <div id="ntfy-state" class="note" style="margin:0 0 6px"></div>
+        <div>Канал: <b id="ntfy-name" style="overflow-wrap:anywhere"></b></div>
+        <ol class="steps" style="margin:8px 0 0">
+          <li>Поставьте на телефон приложение ntfy: <button class="link" id="ntfy-ios">App Store</button> или <button class="link" id="ntfy-android">Google Play</button>.</li>
+          <li>В приложении нажмите «+» и введите имя канала выше (сервер оставьте ntfy.sh).</li>
+          <li>Проверьте: <button class="link" id="btn-ntfy-test">отправить проверочное уведомление</button> — оно уходит с компьютера, роутер не трогает.</li>
+        </ol>
+        <div id="ntfy-msg" class="msg"></div>
+        <p class="note">Кто знает имя канала, может читать уведомления, поэтому оно длинное и случайное. В уведомлениях только короткие
+          сообщения вроде «DOWN: zapret» — без паролей и адресов.</p>
+      </div>
+    </div>
+    <label id="problems-box" class="req hidden" style="border:0;margin-top:10px">
+      <input type="checkbox" id="problems-ok">
+      <div><div class="t">Анализ нашёл серьёзные проблемы. Всё равно продолжить</div></div>
+    </label>
+    <div id="set-msg" class="msg err"></div>
+    <div class="buttons">
+      <button id="btn-dry" class="secondary wide" data-help="показывает по шагам, что будет сделано, ничего не меняя. Хорошо начать с него.">Пробный прогон (ничего не меняет)</button>
+      <button id="btn-install" class="primary wide" data-change="1" data-help="ставит выбранное. Нужно нажать два раза: второй — подтверждение. При сбое всё откатится само, а позже всё можно убрать кнопкой «Откатить всё».">Установить</button>
+      <button class="secondary" data-go="modules">Назад</button>
+    </div>
+    <p class="note">Перед установкой сохранится снимок всех настроек. Если что-то пойдёт не так, изменения откатятся сами.</p>
+  </section>
+
+  <!-- Screen 5: installing / result -->
+  <section id="scr-install" class="card hidden">
+    <h2 id="in-title">Установка</h2>
+    <div id="in-status" class="status" style="margin:4px 0 10px"><div class="spinner"></div><span id="in-status-text">Начинаю…</span></div>
+    <div class="bar"><div id="in-bar"></div></div>
+    <div id="in-items"></div>
+    <div id="in-summary" class="hidden"></div>
+    <div id="in-msg" class="msg"></div>
+    <details><summary>Подробный журнал</summary><pre id="in-log"></pre></details>
+    <div class="buttons">
+      <button id="btn-real" class="primary wide hidden" data-change="1" data-help="то, что показал пробный прогон, но уже по-настоящему. Нужно нажать два раза.">Установить по-настоящему</button>
+      <button id="btn-save" class="primary wide hidden" data-help="сохраняет на этот компьютер копию настроек роутера, сделанную до установки. Пригодится, если придётся восстанавливать.">Сохранить снимок настроек на компьютер</button>
+      <button id="btn-in-status" class="secondary hidden" data-help="что установлено и работает ли; там же откат.">Статус и откат</button>
+      <button id="btn-back-settings" class="secondary hidden" data-go="settings" data-help="вернуться и поправить настройки.">К настройкам</button>
+      <button id="btn-done" class="secondary hidden" data-help="закрывает соединение с роутером.">Отключиться</button>
+    </div>
+  </section>
+
+  <!-- Screen 6: status and "roll back everything" -->
+  <section id="scr-status" class="card hidden">
+    <h2>Статус</h2>
+    <div id="st-status" class="status" style="margin:4px 0 10px"><div class="spinner"></div><span id="st-status-text">Проверяю…</span></div>
+    <div id="st-verdict" class="verdict hidden"></div>
+    <div id="upd-st" class="warnbox hidden" style="margin:0 0 14px">
+      <div class="upd-text"></div>
+      <div class="buttons" style="margin-top:10px"><button id="btn-upd-st" class="primary" data-change="1" data-help="заменяет скрипты switchback на роутере новыми и добавляет новые функции. Ваши настройки не меняются. Нужно нажать два раза.">Обновить switchback на роутере</button></div>
+      <div class="msg"></div>
+    </div>
+    <div id="st-items"></div>
+    <div id="st-msg" class="msg"></div>
+    <details><summary>Подробный журнал</summary><pre id="st-log"></pre></details>
+    <div class="buttons">
+      <button id="btn-sites" class="secondary wide" data-help="добавить в обход сайт, который не открывается или тормозит. Сам переход ничего не меняет.">Свои сайты</button>
+      <button id="btn-to-tune" class="secondary wide" data-help="если YouTube и другие снова тормозят: подобрать новые настройки zapret. Сам переход ничего не меняет.">Подбор настроек zapret</button>
+    </div>
+    <div class="buttons">
+      <button id="btn-st-again" class="secondary" data-help="проверяет всё ещё раз.">Обновить</button>
+      <button id="btn-report" class="secondary" data-help="собирает отчёт о состоянии роутера без паролей и ключей и сохраняет его на компьютер — его можно показать тому, кто помогает.">Отчёт для диагностики</button>
+      <button class="secondary" data-go="analyze">Назад</button>
+    </div>
+    <div class="group" style="margin-top:20px">Откатить всё</div>
+    <p class="note">Отменяет всё, что сделал switchback: zapret-настройки, DNS-записи, маршруты, сторож, созданное подключение
+      WireGuard. Ваши собственные настройки не трогаются. Снимки настроек остаются на роутере.</p>
+    <label class="req" style="border:0"><input type="checkbox" id="rb-pkgs">
+      <div><div class="t">Удалить и пакеты, которые ставил switchback (zapret, curl, cron…)</div></div></label>
+    <div class="buttons"><button id="btn-rollback" class="secondary wide" style="background:rgba(229,96,79,.2);color:#f3a79c" data-change="1" data-help="убирает всё, что поставил switchback, и возвращает как было. Нужно нажать два раза.">Откатить всё</button></div>
+  </section>
+
+  <!-- Screen 10: Entware on a Keenetic through its web interface -->
+  <section id="scr-entware" class="card hidden">
+    <h2>Поставить Entware</h2>
+    <p class="note" style="margin-top:0">Программа зайдёт в веб-интерфейс роутера (логин admin), проверит компоненты и флешку,
+      запустит установку Entware на флешку (роутер скачает его сам) и задаст новый пароль root вместо стандартного.</p>
+    <div class="row">
+      <div><label for="ew-host">Адрес роутера</label><input id="ew-host" value="192.168.1.1" spellcheck="false"></div>
+      <div><label for="ew-user">Логин веб-интерфейса</label><input id="ew-user" value="admin" spellcheck="false"></div>
+    </div>
+    <label for="ew-pass">Пароль веб-интерфейса (тот, которым входите на 192.168.1.1)</label>
+    <input id="ew-pass" type="password" autocomplete="off">
+    <div class="buttons">
+      <button id="btn-ew-check" class="primary wide" data-help="заходит в веб-интерфейс и смотрит компоненты и флешку. Роутер не меняет.">Проверить роутер</button>
+      <button class="secondary" data-go="prereq">Назад</button>
+    </div>
+    <div id="ew-status" class="status hidden" style="margin-top:12px"><div class="spinner"></div><span id="ew-status-text"></span></div>
+    <div id="ew-items"></div>
+    <div id="ew-go" class="hidden">
+      <label for="ew-arch">Установщик (выбран по процессору роутера)</label>
+      <select id="ew-arch">
+        <option value="mipsel">mipsel — большинство моделей (Extra, Air, City, Giga, Ultra KN-1810…)</option>
+        <option value="aarch64">aarch64 — новые на ARM (Giga KN-1012, Hopper, Ultra KN-1811…)</option>
+        <option value="mips">mips — модели с DSL (DSL, Duo, Hero DSL…)</option>
+      </select>
+      <div class="row">
+        <div><label for="ew-root1">Новый пароль root (для программы)</label><input id="ew-root1" type="password" autocomplete="off"></div>
+        <div><label for="ew-root2">Ещё раз</label><input id="ew-root2" type="password" autocomplete="off"></div>
+      </div>
+      <p class="note">Запишите его: им программа будет входить на роутер. Нигде не сохраняется.</p>
+      <div class="buttons">
+        <button id="btn-ew-install" class="primary wide" data-change="1" data-help="запускает установку Entware на флешку и меняет стандартный пароль root. Нужно нажать два раза. Идёт 2–10 минут.">Поставить Entware</button>
+      </div>
+    </div>
+    <div id="ew-msg" class="msg"></div>
+    <div class="buttons hidden" id="ew-done">
+      <button id="btn-ew-connect" class="primary wide" data-help="переходит к подключению с новым паролем.">Подключиться</button>
+    </div>
+  </section>
+
+  <!-- Screen 8: own sites -->
+  <section id="scr-sites" class="card hidden">
+    <h2>Свои сайты</h2>
+    <p class="note" style="margin-top:0">Сайт, который не открывается или тормозит, можно добавить в обход. YouTube, Discord, Instagram, ChatGPT,
+      Claude и Telegram уже встроены — их добавлять не нужно.</p>
+    <div id="si-status" class="status hidden" style="margin:12px 0"><div class="spinner"></div><span id="si-status-text"></span></div>
+    <div id="si-list"></div>
+    <p class="note" id="si-list-note"></p>
+    <div class="group" style="margin-top:18px">Добавить сайт</div>
+    <label for="si-domain">Адрес сайта</label>
+    <input id="si-domain" placeholder="например, example.com или ссылка на страницу" spellcheck="false">
+    <label>Как пускать</label>
+    <div id="si-ways"></div>
+    <div class="buttons">
+      <button id="btn-si-check" class="secondary" data-help="проверяет, открывается ли сайт с роутера сейчас.">Проверить, открывается ли</button>
+      <button id="btn-si-add" class="primary wide" data-change="1" data-help="добавляет сайт выбранным способом. Убрать его можно здесь же или кнопкой «Откатить всё».">Добавить</button>
+      <button class="secondary" data-go="status">Назад</button>
+    </div>
+    <div id="si-msg" class="msg"></div>
+    <details><summary>Подробный журнал</summary><pre id="si-log"></pre></details>
+  </section>
+
+  <!-- Screen 9: zapret tuning -->
+  <section id="scr-tune" class="card hidden">
+    <h2>Подбор настроек zapret</h2>
+    <p class="note" style="margin-top:0">Если YouTube, Instagram или Discord снова стали тормозить, хотя zapret работает, значит провайдер поменял
+      блокировку. Программа по очереди попробует 8 способов обхода, измерит с роутера, как открываются эти сайты, и поставит
+      три лучших: первый — основной, остальные zapret включит сам, если основной перестанет работать. Если лучше, чем сейчас,
+      не найдётся, ничего не изменится.</p>
+    <div class="warnbox">Это займёт 3–8 минут. В это время YouTube и другие сайты дома могут подтормаживать на несколько секунд.</div>
+    <div id="tu-status" class="status hidden" style="margin-top:12px"><div class="spinner"></div><span id="tu-status-text"></span></div>
+    <div class="bar" style="margin-top:12px"><div id="tu-bar"></div></div>
+    <div id="tu-items"></div>
+    <div id="tu-msg" class="msg"></div>
+    <details><summary>Подробный журнал</summary><pre id="tu-log"></pre></details>
+    <div class="buttons">
+      <button id="btn-tune" class="primary wide" data-change="1" data-help="пробует способы обхода и записывает лучшие. Нужно нажать два раза.">Начать подбор</button>
+      <button id="btn-tune-undo" class="secondary" data-change="1" data-help="возвращает настройки zapret, какие были до последнего подбора.">Вернуть как было</button>
+      <button class="secondary" data-go="status">Назад</button>
+    </div>
+    <h3 style="margin-top:20px">Серверы видео YouTube</h3>
+    <p class="note" style="margin-top:0">Если сам YouTube открывается, а ролики встают или не грузятся: у серверов видео будет свой
+      набор из 6 способов обхода. zapret пробует их по кругу и сам переходит к следующему, если способ перестал работать.
+      Остальные сайты это не затрагивает. При новой установке включается само.</p>
+    <div id="tv-msg" class="msg"></div>
+    <div class="buttons">
+      <button id="btn-video-on" class="secondary" data-change="1" data-help="записывает в zapret отдельные способы для серверов видео YouTube и перезапускает его. Нужно нажать два раза.">Включить способы для видео</button>
+      <button id="btn-video-off" class="secondary" data-change="1" data-help="убирает отдельные способы: серверы видео снова идут по общим настройкам zapret. Нужно нажать два раза.">Выключить</button>
+    </div>
+  </section>
+
+  <!-- Screen 7: flashing helper (the program never flashes by itself) -->
+  <section id="scr-flash" class="card hidden">
+    <h2>Как перепрошить на OpenWrt</h2>
+    <div class="verdict v1" id="fl-device"></div>
+    <p class="note" style="margin-top:0">Программа сама ничего не прошивает: прошиваете вы, по шагам ниже. Ошибка в прошивке может
+      сделать роутер неработающим («кирпич»), а гарантия обычно пропадает.</p>
+    <ol class="steps">
+      <li><b>Сверьте ревизию.</b> На наклейке роутера найдите «Ver» / «Rev» (например, v3.20). Устройство выше должно
+        совпадать с ней: для другой ревизии нужна другая прошивка.</li>
+      <li><b>Прочитайте страницу устройства на openwrt.org</b> — раздел Installation: каким способом ставить первую
+        прошивку. <button class="link" id="fl-info">Открыть поиск на openwrt.org</button></li>
+      <li><b>Скачайте прошивку</b> в официальном выборе прошивок. Для первой установки обычно нужен файл
+        <b>factory</b>; <b>sysupgrade</b> — для обновления уже стоящего OpenWrt.
+        <button class="link" id="fl-selector">Открыть выбор прошивки</button></li>
+      <li><b>Проверьте скачанный файл</b>: программа сверит его с официальными контрольными суммами этой модели.
+        <div class="buttons" style="margin-top:6px"><button id="btn-fl-check" class="secondary" data-help="сверяет скачанный файл с официальным. Роутер не трогает и ничего не прошивает.">Проверить файл прошивки</button></div>
+        <div id="fl-msg" class="msg"></div></li>
+      <li><b>Прошейте</b> способом со страницы устройства: компьютер — по кабелю, не по Wi-Fi; питание не отключать,
+        пока роутер сам не перезагрузится (обычно 3–5 минут).</li>
+      <li><b>После прошивки</b> роутер будет на 192.168.1.1 без пароля. Зайдите в веб-интерфейс, задайте пароль,
+        подключите интернет — и возвращайтесь в switchback с выбором «OpenWrt».</li>
+    </ol>
+    <div class="buttons"><button class="secondary" data-go="prereq">Назад</button></div>
+  </section>
+
+  <footer id="ver"></footer>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+
+  // Every button with data-help gets a line under its group: what it does and whether it changes the router.
+  // Lines follow their button's visibility, and buttons added later get theirs too.
+  function syncHelp() {
+    document.querySelectorAll('button[data-help]').forEach(b => {
+      if (!b._help) {
+        const box = b.closest('.buttons, .row');
+        let ul = box.nextElementSibling;
+        if (!ul || !ul.classList.contains('help')) { ul = document.createElement('ul'); ul.className = 'help'; box.after(ul); }
+        const ch = b.dataset.change === '1';
+        const li = document.createElement('li');
+        const tag = document.createElement('span');
+        tag.className = 'tag ' + (ch ? 'change' : 'safe');
+        tag.textContent = ch ? 'меняет роутер' : 'безопасно';
+        const name = document.createElement('b'); name.textContent = b.textContent.trim();
+        li.append(tag, name, ' — ' + b.dataset.help);
+        ul.append(li); b._help = li; b.title = b.dataset.help;
+      }
+      const hide = b.classList.contains('hidden');
+      if (b._help.classList.contains('hidden') !== hide) b._help.classList.toggle('hidden', hide);
+    });
+  }
+  syncHelp();
+  new MutationObserver(syncHelp).observe(document.body, { subtree:true, childList:true, attributes:true, attributeFilter:['class'] });
+  const App = () => window.go.main.App;
+  const ICON = { ok:'✓', skip:'·', warn:'!', bad:'✗', dry:'»' };
+  let groupBox = null;
+
+  // ---------- what is needed beforehand (same as docs/01-entware.md and README) ----------
+  // [title, how-to, required]
+  const REQ = {
+    keenetic: [
+      ['Роутер Keenetic или Netcraze с USB-портом', 'Netcraze — это Keenetic, который с 2025 года продаётся в России под новым именем, прошивка та же. Модели без USB не подойдут: программам нужна флешка.', true],
+      ['USB-флешка от 1 ГБ, отформатированная в ext4, вставлена в роутер', 'Всё, что было на флешке, удалится. На Windows отформатировать в ext4 можно бесплатной программой AOMEI Partition Assistant (с официального сайта). Метка тома — например, ENTWARE.', true],
+      ['Включены компоненты «Поддержка открытых пакетов», «Файловая система Ext» и «Модули ядра подсистемы Netfilter»', 'Веб-интерфейс роутера (192.168.1.1) → Общие настройки → Изменить набор компонентов. Роутер обновится и перезагрузится.', true],
+      ['Компьютер подключён к сети этого роутера', 'По Wi-Fi или кабелю.', true],
+      ['Поставит Entware на флешку', 'Роутер поставит его сам: вставьте флешку, откройте http://192.168.1.1/a и отправьте одну строку — для большинства недорогих моделей: opkg disk ENTWARE:/ https://bin.entware.net/mipselsf-k3.4/installer/mipsel-installer.tar.gz (для мощных на ARM — aarch64-k3.10/installer/aarch64-installer.tar.gz). ENTWARE — метка флешки. Установка идёт 2–5 минут.', 'auto'],
+      ['Задаст новый пароль root вместо стандартного', 'После установки Entware пароль — keenetic. Войдите (PowerShell: ssh root@192.168.1.1, если не пускает — ssh -p 222 root@192.168.1.1), введите passwd и задайте свой. Этот пароль понадобится на следующем экране.', 'auto'],
+      ['Для Telegram: компонент «WireGuard VPN» и файл .conf от VPN-сервиса', 'Нужен любой VPN, который выдаёт конфиг WireGuard — например, Telegram-бот ZapretKVN. Берите сервер за границей: с российским выходом Instagram не откроется. Подключение: Интернет → Другие подключения → WireGuard → Загрузить из файла. Галочку «Использовать для выхода в интернет» не ставьте.', false],
+      ['Для ChatGPT и Claude: DNS-сервис', 'Ничего готовить не нужно: в настройках выберите сервис из списка (GeoHide или Bezmezhau) и нажмите «Проверить».', false],
+      ['Для уведомлений: свой Telegram-бот', 'В Telegram: @BotFather → /newbot. Откройте бота, нажмите Start и напишите ему что-нибудь. Токен понадобится при установке.', false],
+    ],
+    openwrt: [
+      ['Роутер с OpenWrt 22.03 или новее', 'Подходят и iStoreOS, x-wrt, ImmortalWrt. Флешка и Entware не нужны.', true],
+      ['Задан пароль root, SSH включён', 'Веб-интерфейс (LuCI) → System → Administration: Router Password, во вкладке SSH Access — Dropbear включён.', true],
+      ['На роутере работает интернет', 'Программа будет скачивать пакеты (zapret, https-dns-proxy).', true],
+      ['Компьютер подключён к сети этого роутера', 'По Wi-Fi или кабелю.', true],
+      ['Для Telegram: интерфейс WireGuard', 'Network → Interfaces → Add new interface → WireGuard VPN. В пире: Allowed IPs = 0.0.0.0/0, галочку Route Allowed IPs снять. Интерфейс — в зону wan.', false],
+      ['Для ChatGPT и Claude: DNS-сервис', 'Ничего готовить не нужно: в настройках выберите сервис из списка (Zapret DNS) и нажмите «Проверить».', false],
+      ['Для уведомлений: свой Telegram-бот', 'В Telegram: @BotFather → /newbot, нажмите у бота Start и напишите ему что-нибудь.', false],
+    ],
+  };
+  let fw = null;
+  function store(k, v) { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} }
+  function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+  function renderReq() {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.fw === fw));
+    const box = $('req-list'); box.textContent = '';
+    // nothing to tick: the program checks everything itself. Keenetic: the first run goes through "prepare the router"
+    const kn = fw === 'keenetic', rd = $('btn-ready');
+    rd.disabled = !(kn || fw === 'openwrt');
+    rd.className = kn ? 'secondary' : 'primary wide';
+    rd.textContent = kn ? 'Роутер уже подготовлен — подключиться' : 'Продолжить — подключиться';
+    $('btn-ew-open').classList.toggle('hidden', !kn);
+    $('ready-note').textContent = kn ? 'Первый раз — «Продолжить»: программа сама проверит роутер и флешку, поставит Entware и задаст пароль. ' +
+        'Если Entware уже стоит и пароль root вы знаете — «Роутер уже подготовлен».'
+      : fw === 'openwrt' ? 'Галочки ставить не нужно: программа сама проверит всё после подключения.' : '';
+    if (!fw) return;
+    if (fw === 'other') {
+      const w = document.createElement('div'); w.className = 'warnbox';
+      w.textContent = 'Пока поддерживаются только Keenetic / Netcraze и OpenWrt. Роутеры TP-Link, Xiaomi, Asus, Cudy и других брендов ' +
+        'на заводской прошивке сначала нужно перепрошить на OpenWrt — если модель есть в списке поддерживаемых на openwrt.org. ' +
+        'Какая прошивка стоит, видно в веб-интерфейсе роутера (обычно 192.168.1.1 или 192.168.0.1).';
+      box.append(w);
+      // "will my router work?": look the model up in the official OpenWrt data
+      const c = document.createElement('div'); c.style.marginTop = '14px';
+      c.innerHTML = '<label for="model">Модель и ревизия с наклейки роутера</label>' +
+        '<div class="row"><div><input id="model" placeholder="например, Archer C6 v3 или AX3000T" spellcheck="false"></div>' +
+        '<div style="flex:0 0 auto"><button id="btn-model" class="secondary" data-help="ищет модель в официальном списке OpenWrt. Роутер не трогает.">Проверить</button></div></div>' +
+        '<div id="model-msg" class="msg"></div><div id="model-list"></div>';
+      box.append(c);
+      $('btn-model').onclick = checkModel;
+      $('model').addEventListener('keydown', e => { if (e.key === 'Enter') checkModel(); });
+      return;
+    }
+    let lastReq = null, n = 0, later = null;
+    REQ[fw].forEach(([title, how, req]) => {
+      if (req !== lastReq) {
+        lastReq = req;
+        if (req === false) {   // optional things are folded away: not needed for the first run
+          later = document.createElement('details'); later.style.marginTop = '10px';
+          const sm = document.createElement('summary'); sm.className = 'req-title'; sm.style.cursor = 'pointer';
+          sm.textContent = 'Позже, только для Telegram, ChatGPT и уведомлений (показать)';
+          later.append(sm); box.append(later);
+        } else {
+          const h = document.createElement('div'); h.className = 'req-title';
+          h.textContent = req === 'auto' ? 'Это программа сделает сама' : 'Что нужно от вас';
+          box.append(h);
+        }
+      }
+      const row = document.createElement('div'); row.className = 'req';
+      const mark = document.createElement('div'); mark.style.cssText = 'flex:0 0 18px;text-align:center;color:var(--muted)';
+      mark.textContent = req === true ? String(++n) : req === 'auto' ? '✓' : '·';
+      const body = document.createElement('div');
+      const t = document.createElement('div'); t.className = 't'; t.textContent = title;
+      const d = document.createElement('details');
+      const sm = document.createElement('summary'); sm.textContent = req === 'auto' ? 'как сделать вручную' : 'как сделать';
+      const dv = document.createElement('div'); dv.textContent = how;
+      d.append(sm, dv); body.append(t, d); row.append(mark, body); (req === false ? later : box).append(row);
+    });
+  }
+  function updateReady() {
+    const req = [...document.querySelectorAll('#req-list input[data-req="1"]')];
+    $('btn-ready').disabled = !req.length || req.some(c => !c.checked);
+  }
+  document.querySelectorAll('.tab').forEach(t => t.onclick = () => { fw = t.dataset.fw; fwByHand = true; renderReq(); });
+
+  // which router is this: asked on the home network (UPnP), no password, nothing changes on the router
+  let fwByHand = false, detected = null;
+  async function detectRouter() {
+    if (!window.go) return;
+    $('det-status').classList.remove('hidden'); msg($('det-msg'), '');
+    const g = await App().DetectRouter();
+    $('det-status').classList.add('hidden');
+    if (!g.found) {
+      msg($('det-msg'), g.error, 'info');
+      // nothing chosen yet: open the tab where a model from the sticker can be checked, so the user is not left at a dead end
+      if (!fwByHand && !fw) { fw = 'other'; renderReq(); }
+      return;
+    }
+    detected = g;
+    const who = [g.manufacturer, g.model].filter(Boolean).join(', ') + (g.address ? ' (' + g.address + ')' : '');
+    if (g.address && $('host').value === '192.168.1.1') $('host').value = g.address;
+    if (g.firmware === 'keenetic' || g.firmware === 'openwrt') {
+      msg($('det-msg'), 'Найден роутер: ' + who + '. Прошивка — ' + (g.firmware === 'keenetic' ? 'Keenetic / Netcraze' : 'OpenWrt') +
+        (fwByHand ? '.' : ', выбрал её ниже.'), 'info');
+      if (!fwByHand) { fw = g.firmware; renderReq(); }
+      return;
+    }
+    msg($('det-msg'), 'Найден роутер: ' + who + '. Похоже, на нём заводская прошивка: ниже проверю, есть ли для этой модели OpenWrt. ' +
+      'Если модель определилась неточно, поправьте её по наклейке на роутере.', 'info');
+    if (!fwByHand) { fw = 'other'; renderReq(); $('model').value = g.query; checkModel(); }
+  }
+  $('btn-detect').onclick = () => { fwByHand = false; detectRouter(); };
+  $('btn-ready').onclick = () => { store('sb.prereqDone', '1'); store('sb.fw', fw); show('connect'); };
+
+  const SCREENS = ['prereq', 'connect', 'analyze', 'modules', 'settings', 'install', 'status', 'flash', 'sites', 'tune', 'entware'];
+  function show(screen) {
+    SCREENS.forEach(s => $('scr-' + s).classList.toggle('hidden', s !== screen));
+    window.scrollTo(0, 0);
+  }
+  document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => show(b.dataset.go));
+
+  // what the analysis told us about the router
+  const router = { platform: '', vpn: [], vpnUp: {}, tgvia: '', verdict: null };
+  function msg(el, text, kind) {
+    el.textContent = text || '';
+    el.className = 'msg' + (text ? ' show ' + (kind || 'err') : '');
+  }
+  function busy(on) {
+    $('btn-connect').disabled = on;
+    $('connect-status').classList.toggle('hidden', !on);
+  }
+
+  // ---------- installer events ----------
+  function addItem(kind, text) {
+    const row = document.createElement('div'); row.className = 'item';
+    const ic = document.createElement('span'); ic.className = 'icon i-' + kind; ic.textContent = ICON[kind] || '•';
+    const tx = document.createElement('span'); tx.textContent = text;
+    row.append(ic, tx);
+    (groupBox || $('items')).append(row);
+  }
+  let phase = 'analyze';   // which screen the installer events belong to
+  function onEvent(ev) {
+    if (phase === 'install') return onInstallEvent(ev);
+    if (phase === 'status') return onStatusEvent(ev);
+    if (phase === 'wg') return onWgEvent(ev);
+    if (phase === 'tune') return onTuneEvent(ev);
+    if (phase === 'entware') {
+      const st = { started: 'Роутер скачивает и ставит Entware на флешку…', waiting: 'Жду, пока Entware запустится (обычно 2–5 минут)…', done: 'Entware запустился, задаю пароль root…' }[(ev.fields || [])[0]];
+      if (ev.kind === 'entware' && st) $('ew-status-text').textContent = st;
+      return;
+    }
+    if (phase === 'sites' || phase === 'update') return;
+    const f = ev.fields || [];
+    switch (ev.kind) {
+      case 'installed': setUpdate(f[0], f[1]); break;
+      case 'fw': firmwareHint(f[0], f[1], f[2] || ''); break;
+      case 'ntfy': router.ntfy = f[0]; break;
+      case 'platform': router.platform = f[0]; break;
+      case 'vpn': router.vpn.push(f[0]); router.vpnUp[f[0]] = f[1] === 'up'; break;
+      case 'tgvia': router.tgvia = f[0]; break;
+      case 'group': {
+        const h = document.createElement('div'); h.className = 'group'; h.textContent = f[0];
+        groupBox = document.createElement('div');
+        $('items').append(h, groupBox);
+        $('an-status-text').textContent = 'Проверяю: ' + f[0].toLowerCase() + '…';
+        break;
+      }
+      case 'item': addItem(f[0], f[1]); break;
+      case 'doctor': {
+        const v = f[0], w = f[1], p = f[2];
+        const text = v === '0' ? 'Всё готово к установке'
+                   : v === '1' ? 'Можно ставить, но прочитайте предупреждения (' + w + ')'
+                   : 'Ставить не рекомендую, пока не исправлены проблемы (' + p + ')';
+        const el = $('verdict'); el.textContent = text; el.className = 'verdict v' + v;
+        router.verdict = v;
+        break;
+      }
+      case 'fail': msg($('an-msg'), f[0]); break;
+    }
+  }
+  function onLog(line) {
+    const l = $({ install: 'in-log', status: 'st-log', sites: 'si-log', tune: 'tu-log' }[phase] || 'log');
+    l.textContent += line + '\n'; l.scrollTop = l.scrollHeight;
+  }
+
+  // ---------- screen 3: what to install ----------
+  const MOD = { https: 'Источники пакетов по https', zapret: 'zapret: YouTube, Discord, Instagram',
+                dns: 'DNS для ChatGPT и Claude', vpn: 'Telegram через VPN', meta: 'Instagram, Facebook, WhatsApp через VPN', watchdog: 'Сторож в Telegram и еженедельный бэкап', failover: 'Автосмена VPN-туннеля', nodes: 'Claude: быстрый узел и запрет QUIC' };
+  const PROFILES = [
+    ['zapret', 'YouTube и Discord на всех устройствах', 'и на телевизоре, и на приставке; заодно Instagram. Ничего покупать и настраивать не нужно (это zapret)', ['https', 'zapret']],
+    ['full', 'Полный набор', 'zapret + DNS (с быстрым узлом Claude) + Telegram и Instagram через VPN + сторож и бэкап + автосмена туннеля', ['https', 'zapret', 'dns', 'nodes', 'vpn', 'meta', 'watchdog', 'failover']],
+    ['dns', 'Только DNS', 'ChatGPT, Claude (+ быстрый узел Claude и запрет QUIC)', ['dns', 'nodes']],
+    ['vpn', 'Только Telegram через VPN', 'нужно подключение WireGuard на роутере', ['vpn']],
+    ['custom', 'Выбрать вручную', '', null],
+  ];
+  let profile = 'zapret';   // the simplest one: installs with one button, no settings
+  function modules() {
+    if (profile !== 'custom') return PROFILES.find(p => p[0] === profile)[3];
+    return Object.keys(MOD).filter(m => $('m-' + m).checked);
+  }
+  function renderProfiles() {
+    const box = $('profiles'); box.textContent = '';
+    PROFILES.forEach(([id, title, desc]) => {
+      const l = document.createElement('label'); l.className = 'profile' + (id === profile ? ' on' : '');
+      const r = document.createElement('input'); r.type = 'radio'; r.name = 'profile'; r.checked = id === profile;
+      r.onchange = () => { profile = id; renderProfiles(); };
+      const b = document.createElement('div');
+      const t = document.createElement('div'); t.textContent = title;
+      if (id === 'zapret') { const s = document.createElement('span'); s.className = 'rec'; s.textContent = 'проще всего — начните с этого'; t.append(s); }
+      b.append(t);
+      if (desc) { const d = document.createElement('div'); d.className = 'd'; d.textContent = desc; b.append(d); }
+      l.append(r, b); box.append(l);
+    });
+    $('custom-box').classList.toggle('hidden', profile !== 'custom');
+    const m = modules();
+    msg($('mod-note'), m.includes('vpn') && !router.vpn.length
+      ? 'На роутере нет подключения WireGuard: «Telegram через VPN» будет пропущен.'
+      : profile === 'zapret' ? 'Telegram, ChatGPT и остальное можно добавить потом: запустите программу ещё раз и выберите другой пункт.' : '', 'info');
+    // the simple way: one button, the settings screen is optional
+    const quick = profile === 'zapret';
+    $('btn-quick').classList.toggle('hidden', !quick);
+    $('btn-to-settings').className = quick ? 'secondary' : 'primary wide';
+    $('btn-to-settings').textContent = quick ? 'Настройки (необязательно)' : 'Далее: настройки';
+  }
+  (function buildCustom() {
+    Object.entries(MOD).forEach(([id, title]) => {
+      const l = document.createElement('label'); l.className = 'req'; l.style.border = '0';
+      const c = document.createElement('input'); c.type = 'checkbox'; c.id = 'm-' + id; c.checked = true;
+      const t = document.createElement('div'); t.textContent = title;
+      l.append(c, t); $('custom-box').append(l);
+    });
+  })();
+  $('btn-next').onclick = () => { renderProfiles(); show('modules'); };
+
+  // ---------- screen 4: settings ----------
+  function renderSettings() {
+    const m = modules(), kn = router.platform === 'keenetic';
+    $('set-zapret').classList.toggle('hidden', !m.includes('zapret'));
+    $('set-zapret-keenetic').classList.toggle('hidden', !kn);
+    $('set-zapret-openwrt').classList.toggle('hidden', kn);
+    $('set-dns').classList.toggle('hidden', !m.includes('dns'));
+    $('set-vpn').classList.toggle('hidden', !m.includes('vpn') && !m.includes('meta'));
+    $('set-meta').classList.toggle('hidden', !m.includes('meta'));
+    $('set-watchdog').classList.toggle('hidden', !m.includes('watchdog'));
+    $('set-failover').classList.toggle('hidden', !m.includes('failover') || router.vpn.length < 2);
+    if (!$('fo-list').value) {   // working order: the tunnel Telegram uses, then the live ones, then the rest
+      const o = [...router.vpn].sort((a, b) => (b === router.tgvia) - (a === router.tgvia) || router.vpnUp[b] - router.vpnUp[a]);
+      $('fo-list').value = o.join(' ');
+    }
+    $('problems-box').classList.toggle('hidden', router.verdict !== '2');
+    renderNtfy();
+    $('dns-hint').textContent = kn
+      ? 'Нужен DNS-over-TLS сервер сервиса, который открывает эти сайты: его IP и имя. Он используется только для доменов этих сервисов.'
+      : 'Нужен адрес DoH сервиса, который открывает эти сайты (https://…/dns-query). Он используется только для доменов этих сервисов.';
+    const box = $('dns-services');
+    if (!box.dataset.platform || box.dataset.platform !== router.platform) {
+      box.textContent = ''; box.dataset.platform = router.platform;
+      ['chatgpt', 'claude'].forEach(svc => {
+        const d = document.createElement('div'); d.className = 'svc';
+        const l = document.createElement('label'); l.className = 'req'; l.style.border = '0'; l.style.padding = '0';
+        const c = document.createElement('input'); c.type = 'checkbox'; c.id = 'dns-' + svc;
+        const t = document.createElement('div'); t.className = 't'; t.textContent = svc === 'chatgpt' ? 'ChatGPT' : 'Claude';
+        l.append(c, t); d.append(l);
+        const f = document.createElement('div'); f.className = 'hidden';
+        // a ready-made service from the list, or "your own" with the fields below
+        const pl = document.createElement('label'); pl.textContent = 'DNS-сервис'; pl.htmlFor = 'dns-' + svc + '-preset';
+        const ps = document.createElement('select'); ps.id = 'dns-' + svc + '-preset';
+        const pn = document.createElement('div'); pn.className = 'note'; pn.style.margin = '4px 0 0';
+        f.append(pl, ps, pn);
+        const ff = document.createElement('div');
+        const field = (id, label, ph) => {
+          const lb = document.createElement('label'); lb.textContent = label; lb.htmlFor = id;
+          const i = document.createElement('input'); i.id = id; i.placeholder = ph; i.spellcheck = false;
+          ff.append(lb, i);
+        };
+        if (kn) { field('dns-' + svc + '-ip', 'IP DoT-сервера', 'например, 203.0.113.10'); field('dns-' + svc + '-sni', 'Имя (SNI) DoT-сервера', 'например, dns.example.com'); }
+        else field('dns-' + svc + '-doh', 'Адрес DoH', 'https://…/dns-query');
+        f.append(ff);
+        const cb = document.createElement('div'); cb.className = 'buttons'; cb.style.marginTop = '8px';
+        const btn = document.createElement('button'); btn.className = 'secondary'; btn.textContent = 'Проверить, работает ли';
+        btn.dataset.help = 'спрашивает DNS-сервис с этого компьютера и открывает сайт через адрес, который он дал. Роутер не трогает.';
+        cb.append(btn); f.append(cb);
+        const cm = document.createElement('div'); cm.className = 'msg'; f.append(cm);
+        btn.onclick = async () => {
+          msg(cm, 'Проверяю…', 'info'); btn.disabled = true;
+          const v = id => ($('dns-' + svc + '-' + id) || {}).value || '';
+          const r = await App().CheckDNS(kn ? 'dot' : 'doh', v('ip'), v('sni'), v('doh'), svc);
+          btn.disabled = false;
+          msg(cm, r.ok ? 'Работает: ' + (svc === 'chatgpt' ? 'ChatGPT' : 'Claude') + ' открылся через ' + r.node + ' за ' + r.time + ' с.' : r.error, r.ok ? 'info' : 'err');
+        };
+        ps.onchange = () => {
+          const p = (dnsPresets || []).find(x => x.id === ps.value);
+          ff.classList.toggle('hidden', !!p); msg(cm, '');
+          pn.textContent = p ? p.note : 'Свой сервис: впишите его данные (берутся на сайте сервиса).';
+          if (!p) return;
+          if (kn) { $('dns-' + svc + '-ip').value = p.ip; $('dns-' + svc + '-sni').value = p.sni; }
+          else $('dns-' + svc + '-doh').value = p.doh;
+        };
+        c.onchange = () => f.classList.toggle('hidden', !c.checked);
+        d.append(f); box.append(d);
+      });
+      fillPresets(kn);
+    }
+    const sel = $('vpn'); sel.textContent = '';
+    router.vpn.forEach(v => { const o = document.createElement('option'); o.value = v;
+      o.textContent = v + (router.vpnUp[v] ? ' — подключено' : ' — сейчас не подключено') + (v === router.tgvia ? ', Telegram уже идёт через него' : '');
+      sel.append(o); });
+    // default: the connection Telegram already uses, else the first one that is up
+    sel.value = router.tgvia && router.vpn.includes(router.tgvia) ? router.tgvia : (router.vpn.find(v => router.vpnUp[v]) || router.vpn[0] || '');
+    $('vpn-none').classList.toggle('hidden', router.vpn.length > 0);
+    $('btn-wg-spare').classList.toggle('hidden', router.vpn.length === 0);
+    $('vpn-pick').classList.toggle('hidden', router.vpn.length === 0);
+    {   // how safe the VPN part is, like a password strength line: more WireGuard connections - more spares
+      const lv = Math.min(router.vpn.length, 3), bar = $('wg-scale-bar');
+      bar.style.width = [0, 34, 67, 100][lv] + '%';
+      bar.style.background = ['transparent', 'var(--bad)', 'var(--warn)', 'var(--ok)'][lv];
+      $('wg-scale-text').textContent = 'Надёжность: ' + [
+        'подключений WireGuard пока нет.',
+        'одно подключение — может отвалиться. Если его сервер перестанет работать, Telegram пропадёт. Добавьте запасное.',
+        'два подключения — уже лучше: есть запасное, автосмена переключит на него сама.',
+        'три и больше — надёжно: связь останется, даже если два сервера перестанут работать.'][lv];
+    }
+    msg($('set-msg'), '');
+  }
+  // ready-made DNS services for this firmware (checked on a real router), the recommended one first
+  let dnsPresets = null;
+  async function fillPresets(kn) {
+    dnsPresets = window.go ? await App().DNSPresets(router.platform) : [];
+    ['chatgpt', 'claude'].forEach(svc => {
+      const ps = $('dns-' + svc + '-preset'); if (!ps) return;
+      ps.textContent = '';
+      dnsPresets.filter(p => p.services.includes(svc)).forEach(p => {
+        const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; ps.append(o);
+      });
+      const o = document.createElement('option'); o.value = 'custom'; o.textContent = 'Свой вариант'; ps.append(o);
+      ps.onchange();
+    });
+  }
+  $('btn-to-settings').onclick = () => {
+    if (!modules().length) { msg($('mod-note'), 'Выберите хотя бы один модуль.', 'err'); return; }
+    renderSettings(); show('settings');
+  };
+  $('btn-quick').onclick = () => {
+    renderSettings();
+    const [ans, err] = collectAnswers();
+    if (!ans) { show('settings'); msg($('set-msg'), err); return; }   // something must be answered first
+    install(false, $('btn-quick'));
+  };
+
+  // ---------- reserve channel ntfy ----------
+  // the channel already on the router (from the analysis), else the one made earlier on this PC, else a new one
+  let ntfyURL = '';
+  async function renderNtfy() {
+    if (router.ntfy) ntfyURL = router.ntfy;
+    else if (!ntfyURL) { ntfyURL = load('sb.ntfy') || (window.go ? await App().NewNtfyChannel() : ''); store('sb.ntfy', ntfyURL); }
+    $('ntfy-name').textContent = ntfyURL.split('/').pop();
+    $('ntfy-state').textContent = router.ntfy ? 'Уже настроен на роутере — менять ничего не нужно.' : 'Имя придумано программой — запишется на роутер при установке.';
+    $('ntfy-on').disabled = !!router.ntfy;
+    $('ntfy-box').classList.toggle('hidden', !$('ntfy-on').checked && !router.ntfy);
+  }
+  $('ntfy-on').onchange = renderNtfy;
+  $('ntfy-ios').onclick = () => openURL('https://apps.apple.com/app/ntfy/id1625396347');
+  $('ntfy-android').onclick = () => openURL('https://play.google.com/store/apps/details?id=io.heckel.ntfy');
+  $('btn-ntfy-test').onclick = async () => {
+    msg($('ntfy-msg'), 'Отправляю…', 'info');
+    const e = await App().TestNtfy(ntfyURL);
+    msg($('ntfy-msg'), e || 'Отправлено. Если подписались на канал — уведомление уже на телефоне.', e ? 'err' : 'info');
+  };
+
+  let botChat = '';
+  $('btn-bot').onclick = async () => {
+    $('btn-bot').disabled = true; msg($('bot-msg'), 'Проверяю…', 'info');
+    const r = await App().CheckBot($('token').value);
+    $('btn-bot').disabled = false;
+    botChat = r.chat || '';
+    if (r.ok && !r.error) msg($('bot-msg'), 'Бот @' + r.username + ' найден, чат для уведомлений определён.', 'info');
+    else msg($('bot-msg'), r.error, r.ok ? 'info' : 'err');
+  };
+  $('token').oninput = () => { botChat = ''; msg($('bot-msg'), ''); };
+
+  // the window's choices as installer answers (docs/answers.md); null + message if something is missing
+  function collectAnswers() {
+    const m = modules(), kn = router.platform === 'keenetic', a = {};
+    if (profile === 'custom') { a.profile = 'custom'; a.modules = m.join(' '); } else a.profile = profile;
+    a.start = 'y'; a.continue_with_warnings = 'y';
+    if (router.verdict === '2') {
+      if (!$('problems-ok').checked) return [null, 'Анализ нашёл серьёзные проблемы: исправьте их или отметьте «Всё равно продолжить».'];
+      a.continue_with_problems = 'y';
+    }
+    if (m.includes('zapret')) {
+      if (kn) a.zapret_exclude_policy = $('policy').value.trim();
+      else a.disable_offload = $('offload').checked ? 'y' : 'n';
+      a.no_quic = $('noquic').checked ? 'y' : 'n';
+    }
+    if (m.includes('dns')) {
+      for (const svc of ['chatgpt', 'claude']) {
+        const on = $('dns-' + svc).checked, name = svc === 'chatgpt' ? 'ChatGPT' : 'Claude';
+        a['dns_' + svc] = on ? 'y' : 'n';
+        if (!on) continue;
+        if (kn) {
+          const ip = $('dns-' + svc + '-ip').value.trim(), sni = $('dns-' + svc + '-sni').value.trim();
+          if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return [null, name + ': IP DoT-сервера должен быть вида 203.0.113.10.'];
+          if (!sni) return [null, name + ': укажите имя (SNI) DoT-сервера.'];
+          a['dns_' + svc + '_ip'] = ip; a['dns_' + svc + '_sni'] = sni;
+        } else {
+          const u = $('dns-' + svc + '-doh').value.trim();
+          if (!/^https:\/\/\S+$/.test(u)) return [null, name + ': адрес DoH должен начинаться с https://'];
+          a['dns_' + svc + '_doh'] = u;
+        }
+      }
+    }
+    if (m.includes('vpn') && router.vpn.length) a.vpn_iface = $('vpn').value;
+    if (m.includes('meta')) a.meta_vpn = $('meta-on').checked ? 'y' : 'n';
+    if (m.includes('failover') && $('fo-list').value.trim()) a.failover_tunnels = $('fo-list').value.trim().split(/\s+/).join(' ');
+    if (m.includes('watchdog') && $('ntfy-on').checked && !router.ntfy && ntfyURL) a.ntfy_url = ntfyURL;
+    if (m.includes('watchdog') && $('token').value.trim()) {
+      a.bot_token = $('token').value.trim();
+      if (botChat) a.bot_chat = botChat;
+    }
+    return [a, ''];
+  }
+
+  // ---------- screen 5: installing ----------
+  let lastDry = false, lastBackup = '';
+  function onInstallEvent(ev) {
+    const f = ev.fields || [];
+    switch (ev.kind) {
+      case 'plan': $('in-status-text').textContent = 'План: ' + f.length + ' шаг(а). Сохраняю снимок настроек…'; break;
+      case 'step': {
+        const n = +f[0], all = +f[1];
+        $('in-status-text').textContent = 'Шаг ' + n + ' из ' + all + ': ' + f[3];
+        $('in-bar').style.width = Math.round((n - 1) / all * 100) + '%';
+        const h = document.createElement('div'); h.className = 'stephead'; h.id = 'step-' + f[2]; h.textContent = n + '. ' + f[3];
+        groupBox = document.createElement('div');
+        $('in-items').append(h, groupBox);
+        break;
+      }
+      case 'result': {
+        const heads = $('in-items').querySelectorAll('.stephead');
+        const h = heads[heads.length - 1];
+        if (h) { const r = document.createElement('span'); r.className = 'r'; r.textContent = '— ' + f[2]; h.append(r); }
+        break;
+      }
+      case 'item': if (groupBox) addItem(f[0], f[1]); break;
+      case 'section': if (/Откат|Проверка после/.test(f[0])) {
+        const h = document.createElement('div'); h.className = 'stephead'; h.textContent = f[0];
+        groupBox = document.createElement('div'); $('in-items').append(h, groupBox);
+      } break;
+      case 'fail': failText = f[0]; msg($('in-msg'), 'Ошибка: ' + f[0] + '. Откатываю изменения этого запуска…'); break;
+    }
+  }
+
+  // a real installation (or rollback) needs a second click within 6 seconds
+  let armed = null;
+  function confirmClick(btn, text) {
+    if (armed === btn) { clearTimeout(btn._t); btn.textContent = btn._label; armed = null; return true; }
+    btn._label = btn._label || btn.textContent;
+    btn.textContent = text || 'Точно установить? Нажмите ещё раз';
+    armed = btn;
+    btn._t = setTimeout(() => { btn.textContent = btn._label; armed = null; }, 6000);
+    return false;
+  }
+
+  let failText = '';
+  async function install(dry, btn) {
+    const [ans, err] = collectAnswers();
+    if (!ans) { msg($('set-msg'), err); return; }
+    if (!dry && !confirmClick(btn)) return;
+    phase = 'install'; lastDry = dry; groupBox = null; failText = '';
+    $('in-title').textContent = dry ? 'Пробный прогон' : 'Установка';
+    $('in-items').textContent = ''; $('in-log').textContent = ''; $('in-bar').style.width = '0';
+    $('in-status').classList.remove('hidden'); $('in-status-text').textContent = 'Копирую установщик и ответы на роутер…';
+    ['btn-real', 'btn-save', 'btn-back-settings', 'btn-done'].forEach(id => $(id).classList.add('hidden'));
+    msg($('in-msg'), '');
+    show('install');
+    const r = await App().Install(ans, dry);
+    phase = 'analyze';
+    $('in-status').classList.add('hidden');
+    $('in-bar').style.width = r.ok ? '100%' : $('in-bar').style.width;
+    $('btn-back-settings').classList.remove('hidden');
+    $('btn-done').classList.remove('hidden');
+    if (!r.ok) {
+      msg($('in-msg'), failText
+        ? 'Ошибка: ' + failText + '. Изменения этого запуска откатились автоматически (подробности в журнале).'
+        : r.error);
+      return;
+    }
+    if (dry) {
+      msg($('in-msg'), 'Пробный прогон закончен: на роутере ничего не изменено. Выше — что будет сделано.', 'info');
+      $('btn-real').classList.remove('hidden');
+    } else {
+      lastBackup = r.backup;
+      msg($('in-msg'), 'Готово. Перед установкой сохранён снимок настроек: ' + r.backup +
+        ' (на роутере). Сохраните его и на компьютер — кнопка ниже.', 'info');
+      if (r.backup) $('btn-save').classList.remove('hidden');
+      $('btn-in-status').classList.remove('hidden');
+    }
+  }
+
+  // ---------- screen 6: status and rollback ----------
+  function onStatusEvent(ev) {
+    const f = ev.fields || [];
+    switch (ev.kind) {
+      case 'group': case 'section': {
+        if (/Анализ|Снимок/.test(f[0])) break;
+        const h = document.createElement('div'); h.className = 'group'; h.textContent = f[0];
+        groupBox = document.createElement('div'); $('st-items').append(h, groupBox); break;
+      }
+      case 'item': if (groupBox) addItem(f[0], f[1]); break;
+      case 'installed': setUpdate(f[0], f[1]); break;
+      case 'status': {
+        const v = f[0], el = $('st-verdict');
+        nothingInstalled = v === 'none';
+        el.textContent = v === 'none' ? 'switchback здесь ещё ничего не ставил — откатывать нечего'
+                       : v === '0' ? 'Всё на месте и работает' : v === '1' ? 'Работает, но есть замечания (' + f[1] + ')' : 'Есть неполадки (' + f[2] + ')';
+        el.className = 'verdict ' + (v === 'none' ? 'vnone' : 'v' + v); break;
+      }
+      case 'fail': msg($('st-msg'), 'Ошибка: ' + f[0]); break;
+    }
+  }
+  // nothing to roll back: the rollback part is greyed out
+  let nothingInstalled = false;
+  function rollbackAvailable(on) {
+    $('btn-rollback').disabled = !on; $('rb-pkgs').disabled = !on;
+    $('btn-rollback').title = on ? '' : 'switchback здесь ничего не ставил';
+  }
+  async function status() {
+    phase = 'status'; groupBox = null; nothingInstalled = false; rollbackAvailable(false); setUpdate('', '');
+    $('st-items').textContent = ''; $('st-log').textContent = ''; msg($('st-msg'), '');
+    $('st-verdict').className = 'verdict hidden';
+    $('st-status').classList.remove('hidden'); $('st-status-text').textContent = 'Проверяю, что установлено…';
+    show('status');
+    const r = await App().Status();
+    phase = 'analyze';
+    $('st-status').classList.add('hidden');
+    if (!r.ok) msg($('st-msg'), r.error);
+    rollbackAvailable(r.ok && !nothingInstalled);
+  }
+  $('btn-status').onclick = status;
+  $('btn-in-status').onclick = status;
+  $('btn-st-again').onclick = status;
+  // diagnostic report: secrets are cut out on the router and checked again before it is given out
+  $('btn-report').onclick = async () => {
+    const b = $('btn-report'); b.disabled = true;
+    msg($('st-msg'), 'Собираю отчёт на роутере (около минуты)…', 'info');
+    const r = await App().Report();
+    b.disabled = false;
+    if (!r.ok) msg($('st-msg'), r.error);
+    else if (r.path) msg($('st-msg'), 'Отчёт сохранён: ' + r.path + '. Пароли, ключи, токены и MAC-адреса в нём вырезаны — его можно показать тому, кто помогает разобраться.', 'info');
+    else msg($('st-msg'), '');
+  };
+  $('btn-rollback').onclick = async () => {
+    const b = $('btn-rollback');
+    if (!confirmClick(b, 'Точно откатить всё? Нажмите ещё раз')) return;
+    phase = 'status'; groupBox = null;
+    $('st-items').textContent = ''; $('st-log').textContent = ''; msg($('st-msg'), '');
+    $('st-verdict').className = 'verdict hidden';
+    $('st-status').classList.remove('hidden'); $('st-status-text').textContent = 'Откатываю изменения switchback…';
+    b.disabled = true;
+    const r = await App().Uninstall($('rb-pkgs').checked);
+    b.disabled = false; phase = 'analyze';
+    $('st-status').classList.add('hidden');
+    msg($('st-msg'), r.ok ? 'Готово: всё, что делал switchback, отменено. Снимки настроек остались на роутере.' : r.error, r.ok ? 'info' : 'err');
+    if (r.ok) rollbackAvailable(false);
+  };
+
+  // ---------- update switchback on the router ----------
+  // shown when the router has an older switchback than this program (or one from before 0.6.0)
+  function setUpdate(have, mine) {
+    const need = have && mine && have !== mine;
+    ['upd-an', 'upd-st'].forEach(id => {
+      const box = $(id);
+      box.classList.toggle('hidden', !need);
+      if (!need) return;
+      box.querySelector('.upd-text').textContent = 'На роутере switchback ' + (have === 'old' ? 'старой версии (до 0.6.0)' : have) +
+        ', в программе — ' + mine + '. Обновление добавит новое: команды боту (/status, /check, /report), свои сайты, ' +
+        'подбор настроек zapret. Ваши настройки не изменятся.';
+      msg(box.querySelector('.msg'), '');
+    });
+  }
+  async function doUpdate(btn) {
+    if (!confirmClick(btn, 'Точно обновить? Нажмите ещё раз')) return;
+    const box = btn.closest('.warnbox'), m = box.querySelector('.msg');
+    btn.disabled = true; msg(m, 'Обновляю…', 'info');
+    phase = 'update';
+    const r = await App().Update();
+    phase = 'analyze'; btn.disabled = false;
+    if (r.ok) { setUpdate('', ''); msg($('st-msg'), 'switchback на роутере обновлён. Ваши настройки не менялись.', 'info');
+      if (!$('scr-analyze').classList.contains('hidden')) msg($('an-msg'), 'switchback на роутере обновлён. Ваши настройки не менялись.', 'info'); }
+    else msg(m, r.error);
+  }
+  $('btn-upd-an').onclick = () => doUpdate($('btn-upd-an'));
+  $('btn-upd-st').onclick = () => doUpdate($('btn-upd-st'));
+
+  // ---------- the firmware already on the router ----------
+  let fwURL = '';
+  async function firmwareHint(platform, version, board) {
+    const h = await App().FirmwareHint(platform, version, board);
+    $('fw-box').classList.toggle('hidden', !h.text);
+    if (!h.text) return;
+    $('fw-text').textContent = h.text;
+    $('fw-text').className = 'msg show ' + (h.warn ? 'err' : 'info');
+    fwURL = h.url || '';
+    $('fw-link').classList.toggle('hidden', !fwURL);
+  }
+  $('fw-link').onclick = () => fwURL && openURL(fwURL);
+
+  // ---------- Entware through the Keenetic web interface ----------
+  let ewCheck = null, ewPort = 22;
+  function ewItem(kind, text) { const old = groupBox; groupBox = $('ew-items'); addItem(kind, text); groupBox = old; }
+  $('btn-ew-open').onclick = () => {
+    if (detected && detected.address) $('ew-host').value = detected.address;
+    $('ew-items').textContent = ''; msg($('ew-msg'), ''); $('ew-go').classList.add('hidden'); $('ew-done').classList.add('hidden');
+    show('entware');
+  };
+  $('btn-ew-check').onclick = async () => {
+    $('ew-items').textContent = ''; msg($('ew-msg'), ''); $('ew-go').classList.add('hidden');
+    $('ew-status').classList.remove('hidden'); $('ew-status-text').textContent = 'Захожу в веб-интерфейс…';
+    const r = await App().KeeneticCheck($('ew-host').value.trim(), $('ew-user').value.trim(), $('ew-pass').value);
+    $('ew-status').classList.add('hidden');
+    ewCheck = r;
+    if (!r.ok) { msg($('ew-msg'), r.error); return; }
+    ewItem('ok', (r.model || 'роутер') + ', KeeneticOS ' + r.firmware);
+    if (r.installed) {
+      ewItem('ok', 'Entware уже стоит на флешке.');
+      msg($('ew-msg'), 'Ставить ничего не нужно: подключайтесь с паролем root (если не меняли — keenetic, и его стоит сменить).', 'info');
+      return;
+    }
+    (r.missing || []).forEach(m => ewItem('bad', 'Нет компонента «' + m + '»: Общие настройки → Изменить набор компонентов, включить и установить.'));
+    if (!(r.missing || []).length) ewItem('ok', 'Нужные компоненты установлены.');
+    if (r.label) ewItem('ok', 'Флешка в ext4 с меткой ' + r.label + ' — подходит.');
+    else ewItem('bad', (r.sticks && r.sticks.length ? 'Флешка есть (' + r.sticks.join(', ') + '), но не подходит' : 'Флешка не найдена') +
+      ': нужна в ext4 и с меткой латиницей (например, ENTWARE). Отформатируйте её (см. «как сделать» в списке) и вставьте в роутер.');
+    const ready = !(r.missing || []).length && r.label;
+    $('ew-arch').value = r.installer || 'mipsel';
+    $('ew-go').classList.toggle('hidden', !ready);
+    if (!ready) msg($('ew-msg'), 'Исправьте отмеченное и нажмите «Проверить роутер» ещё раз.', 'err');
+  };
+  $('btn-ew-install').onclick = async () => {
+    const p1 = $('ew-root1').value, p2 = $('ew-root2').value;
+    if (p1.length < 6) { msg($('ew-msg'), 'Новый пароль root — хотя бы 6 знаков.'); return; }
+    if (p1 !== p2) { msg($('ew-msg'), 'Пароли не совпадают.'); return; }
+    const b = $('btn-ew-install');
+    if (!confirmClick(b, 'Точно поставить? Нажмите ещё раз')) return;
+    b.disabled = true; phase = 'entware'; msg($('ew-msg'), '');
+    $('ew-status').classList.remove('hidden'); $('ew-status-text').textContent = 'Запускаю установку…';
+    const r = await App().InstallEntware($('ew-host').value.trim(), $('ew-user').value.trim(), $('ew-pass').value, ewCheck.label, $('ew-arch').value, p1);
+    b.disabled = false; phase = 'analyze';
+    $('ew-status').classList.add('hidden');
+    $('ew-pass').value = ''; $('ew-root2').value = '';
+    if (!r.ok) { msg($('ew-msg'), r.error); return; }
+    ewPort = r.port;
+    msg($('ew-msg'), 'Entware установлен, пароль root задан. Теперь можно подключаться.', 'info');
+    $('ew-go').classList.add('hidden'); $('ew-done').classList.remove('hidden');
+  };
+  $('btn-ew-connect').onclick = () => {
+    $('host').value = $('ew-host').value.trim(); $('port').value = ewPort; $('user').value = 'root';
+    $('pass').value = $('ew-root1').value; $('ew-root1').value = '';
+    store('sb.prereqDone', '1'); show('connect');
+  };
+
+  // ---------- own sites ----------
+  const WAYS = {
+    zapret: ['zapret', 'Сайт тормозит или открывается через раз — как YouTube. Начните с этого способа.'],
+    dns: ['DNS', 'Сайт пишет «недоступно в вашей стране» — как ChatGPT. Пойдёт через тот же DNS-сервер, что ChatGPT или Claude.'],
+    vpn: ['Через VPN', 'Сайт не открывается совсем — как Telegram. Пойдёт через VPN-туннель.'],
+  };
+  let sitesInfo = null, siteWay = 'zapret';
+  function wayBlocked(w) {   // why this way cannot be used on this router ('' = it can)
+    const i = sitesInfo || {};
+    if (w === 'zapret' && !i.zapret) return 'zapret не установлен';
+    if (w === 'dns' && !(i.dns || []).length) return 'нужен настроенный DNS для ChatGPT или Claude';
+    if (w === 'dns' && i.dnsFree <= 0) return 'роутер больше не принимает таких DNS-записей (все заняты)';
+    if (w === 'vpn' && !i.tunnel) return 'нет работающего VPN-подключения';
+    return '';
+  }
+  function renderWays() {
+    const box = $('si-ways'); box.textContent = '';
+    if (wayBlocked(siteWay)) siteWay = Object.keys(WAYS).find(w => !wayBlocked(w)) || siteWay;
+    Object.entries(WAYS).forEach(([id, [title, desc]]) => {
+      const why = wayBlocked(id);
+      const l = document.createElement('label'); l.className = 'profile' + (id === siteWay ? ' on' : '');
+      if (why) l.style.opacity = '.55';
+      const r = document.createElement('input'); r.type = 'radio'; r.name = 'siteway'; r.checked = id === siteWay; r.disabled = !!why;
+      r.onchange = () => { siteWay = id; renderWays(); };
+      const b = document.createElement('div');
+      const t = document.createElement('div'); t.textContent = title;
+      const d = document.createElement('div'); d.className = 'd';
+      d.textContent = desc + (id === 'vpn' && sitesInfo && sitesInfo.tunnel ? ' Сейчас это ' + sitesInfo.tunnel + '.' : '') + (why ? ' Недоступно: ' + why + '.' : '');
+      b.append(t, d); l.append(r, b); box.append(l);
+    });
+  }
+  function renderSites() {
+    const box = $('si-list'); box.textContent = '';
+    const list = (sitesInfo && sitesInfo.sites) || [];
+    if (!list.length) { const n = document.createElement('div'); n.className = 'note'; n.textContent = 'Своих сайтов пока нет.'; box.append(n); }
+    list.forEach(s => {
+      const row = document.createElement('div'); row.className = 'item'; row.style.alignItems = 'center';
+      const t = document.createElement('span'); t.style.flex = '1'; t.textContent = s.domain + ' — ' + (WAYS[s.way] || [s.way])[0];
+      const b = document.createElement('button'); b.className = 'secondary'; b.style.padding = '4px 10px'; b.textContent = 'Убрать';
+      b.onclick = () => siteDel(s.domain, b);
+      row.append(t, b); box.append(row);
+    });
+    $('si-list-note').textContent = list.length ? '«Убрать» возвращает сайт как было (меняет роутер, нужно нажать два раза).' : '';
+    renderWays();
+  }
+  function siBusy(text) {
+    $('si-status').classList.toggle('hidden', !text); $('si-status-text').textContent = text || '';
+    ['btn-si-add', 'btn-si-check'].forEach(id => $(id).disabled = !!text);
+  }
+  async function loadSites() {
+    phase = 'sites'; siBusy('Читаю список с роутера…');
+    const r = await App().Sites();
+    phase = 'analyze'; siBusy('');
+    if (!r.ok) { msg($('si-msg'), r.error || 'Не удалось прочитать список.'); return; }
+    sitesInfo = r; renderSites();
+  }
+  async function siteDel(domain, btn) {
+    if (!confirmClick(btn, 'Точно убрать?')) return;
+    phase = 'sites'; siBusy('Убираю ' + domain + '…'); msg($('si-msg'), '');
+    const r = await App().SiteDel(domain);
+    phase = 'analyze'; siBusy('');
+    msg($('si-msg'), r.ok ? domain + ' убран.' : r.error, r.ok ? 'info' : 'err');
+    loadSites();
+  }
+  $('btn-sites').onclick = () => { msg($('si-msg'), ''); $('si-log').textContent = ''; show('sites'); loadSites(); };
+  $('btn-si-check').onclick = async () => {
+    const d = $('si-domain').value.trim();
+    if (!d) { msg($('si-msg'), 'Введите адрес сайта.'); return; }
+    phase = 'sites'; siBusy('Проверяю с роутера…');
+    const r = await App().SiteCheck(d);
+    phase = 'analyze'; siBusy('');
+    if (r.error) msg($('si-msg'), r.error);
+    else if (r.opens) msg($('si-msg'), 'Открывается с роутера (за ' + parseFloat(r.time).toFixed(1) + ' с). Если в браузере всё равно не работает — попробуйте добавить его.', 'info');
+    else msg($('si-msg'), 'С роутера не открывается. Добавьте его в обход: если не уверены, начните со способа zapret.', 'err');
+  };
+  $('btn-si-add').onclick = async () => {
+    const d = $('si-domain').value.trim();
+    if (!d) { msg($('si-msg'), 'Введите адрес сайта.'); return; }
+    if (wayBlocked(siteWay)) { msg($('si-msg'), 'Этот способ недоступен: ' + wayBlocked(siteWay) + '.'); return; }
+    const b = $('btn-si-add');
+    if (!confirmClick(b, 'Точно добавить? Нажмите ещё раз')) return;
+    phase = 'sites'; siBusy('Добавляю…'); msg($('si-msg'), '');
+    const r = await App().SiteAdd(d, siteWay);
+    if (!r.ok) { phase = 'analyze'; siBusy(''); msg($('si-msg'), r.error); return; }
+    siBusy('Добавлен. Проверяю, открывается ли…');
+    const c = await App().SiteCheck(d);
+    phase = 'analyze'; siBusy('');
+    msg($('si-msg'), 'Добавлен. ' + (c.opens ? 'С роутера открывается.' : 'С роутера пока не открывается: подождите минуту и проверьте ещё раз, или уберите его и попробуйте другой способ.'), c.opens ? 'info' : 'err');
+    $('si-domain').value = '';
+    loadSites();
+  };
+
+  // ---------- zapret tuning ----------
+  function onTuneEvent(ev) {
+    const f = ev.fields || [];
+    switch (ev.kind) {
+      case 'tune_try':
+        $('tu-status-text').textContent = 'Способ ' + f[0] + ' из ' + f[1] + ': ' + f[2] + '…';
+        $('tu-bar').style.width = Math.round((+f[0] - 1) / +f[1] * 100) + '%'; break;
+      case 'tune_res': if (f[0] === 'сейчас') addItem('skip', 'Сейчас: открылось ' + f[1] + ' из ' + f[2] + ', YouTube ' + Math.round(+f[3] / 1024) + ' КБ/с'); break;
+      case 'item': addItem(f[0], f[1]); break;
+      case 'fail': msg($('tu-msg'), 'Ошибка: ' + f[0]); break;
+    }
+  }
+  async function tune(undo, btn) {
+    if (!confirmClick(btn, undo ? 'Точно вернуть? Нажмите ещё раз' : 'Начать? Нажмите ещё раз')) return;
+    phase = 'tune'; groupBox = $('tu-items'); $('tu-items').textContent = ''; $('tu-log').textContent = '';
+    $('tu-bar').style.width = '0'; msg($('tu-msg'), '');
+    $('tu-status').classList.remove('hidden');
+    $('tu-status-text').textContent = undo ? 'Возвращаю настройки…' : 'Измеряю, как сайты открываются сейчас…';
+    ['btn-tune', 'btn-tune-undo'].forEach(id => $(id).disabled = true);
+    const r = await App().Tune(undo);
+    phase = 'analyze'; groupBox = null;
+    ['btn-tune', 'btn-tune-undo'].forEach(id => $(id).disabled = false);
+    $('tu-status').classList.add('hidden');
+    if (r.ok) $('tu-bar').style.width = '100%';
+    msg($('tu-msg'), r.ok ? (undo ? 'Настройки zapret возвращены как были до подбора.' : 'Подбор закончен, итог — выше.') : r.error, r.ok ? 'info' : 'err');
+  }
+  $('btn-to-tune').onclick = () => { msg($('tu-msg'), ''); show('tune'); };
+  $('btn-tune').onclick = () => tune(false, $('btn-tune'));
+  $('btn-tune-undo').onclick = () => tune(true, $('btn-tune-undo'));
+  // ways of their own for YouTube video servers (install.sh tune video on|off)
+  async function tuneVideo(on, btn) {
+    if (!confirmClick(btn, on ? 'Включить? Нажмите ещё раз' : 'Выключить? Нажмите ещё раз')) return;
+    const ids = ['btn-video-on', 'btn-video-off'];
+    ids.forEach(id => $(id).disabled = true);
+    msg($('tv-msg'), on ? 'Записываю и перезапускаю zapret…' : 'Убираю и перезапускаю zapret…', 'info');
+    const r = await App().TuneVideo(on);
+    ids.forEach(id => $(id).disabled = false);
+    msg($('tv-msg'), r.ok ? (on ? 'Включено: у серверов видео свои способы обхода.' : 'Выключено: серверы видео идут по общим настройкам.') : r.error, r.ok ? 'info' : 'err');
+  }
+  $('btn-video-on').onclick = () => tuneVideo(true, $('btn-video-on'));
+  $('btn-video-off').onclick = () => tuneVideo(false, $('btn-video-off'));
+
+  // ---------- WireGuard from a .conf ----------
+  function onWgEvent(ev) {
+    const f = ev.fields || [];
+    if (ev.kind === 'item' && f[0] !== 'dry') { groupBox = $('wg-items'); addItem(f[0], f[1]); }
+    if (ev.kind === 'fail') msg($('wg-msg'), 'Ошибка: ' + f[0] + '. Изменения откатились.');
+  }
+  async function importWG(standby, b) {
+    b.disabled = true;
+    $('wg-items').textContent = ''; msg($('wg-msg'), 'Выберите файл…', 'info');
+    phase = 'wg';
+    const r = await App().ImportWireGuard(standby);
+    phase = 'analyze'; b.disabled = false;
+    if (r.ok) {
+      if (!router.vpn.includes(r.name)) router.vpn.push(r.name);
+      const keep = $('vpn').value;
+      if (standby && $('fo-list').value.trim()) $('fo-list').value = $('fo-list').value.trim() + ' ' + r.name;
+      renderSettings();
+      if (standby) { $('vpn').value = keep; msg($('wg-msg'), 'Запасной туннель ' + r.name + ' добавлен (выключен). Его включит автосмена, если основной перестанет работать.', 'info'); }
+      else { $('vpn').value = r.name; msg($('wg-msg'), 'Подключение ' + r.name + ' создано и выбрано для Telegram.', 'info'); }
+    } else msg($('wg-msg'), r.error || '', r.error ? 'err' : '');
+  }
+  $('btn-wg').onclick = () => importWG(false, $('btn-wg'));
+  $('btn-wg-spare').onclick = () => importWG(true, $('btn-wg-spare'));
+
+  // ---------- "will my router work?" and the flashing helper ----------
+  let flashDev = null;
+  async function checkModel() {
+    const q = $('model').value.trim(), list = $('model-list');
+    list.textContent = ''; msg($('model-msg'), 'Ищу в данных OpenWrt…', 'info');
+    const r = await App().CheckModel(q);
+    if (r.error) { msg($('model-msg'), r.error); return; }
+    if (!r.matches || !r.matches.length) {
+      msg($('model-msg'), 'В OpenWrt ' + r.version + ' такой модели не нашлось. Проверьте написание (как на наклейке) или поищите на openwrt.org: ' +
+        'бывает, что модель поддерживается под другим названием. Если её нет — перепрошить её на OpenWrt нельзя, и switchback на этот роутер ' +
+        'поставить не получится. Что тогда можно сделать: взять роутер Keenetic / Netcraze с USB-портом или модель, которая есть в OpenWrt ' +
+        '(перед покупкой проверьте её здесь же), а нынешний роутер оставить как точку Wi-Fi.', 'err');
+      return;
+    }
+    msg($('model-msg'), 'Найдено в OpenWrt ' + r.version + (r.more ? ' (показаны первые 30 — уточните запрос)' : '') +
+      '. Выберите своё устройство — ревизия должна совпадать с наклейкой:', 'info');
+    r.matches.forEach(m => {
+      const d = document.createElement('div'); d.className = 'dev';
+      const t = document.createElement('div'); t.textContent = m.title;
+      const s = document.createElement('div'); s.className = 'd'; s.textContent = 'Платформа: ' + m.target;
+      const b = document.createElement('button'); b.className = 'link'; b.textContent = 'Как перепрошить это устройство →';
+      b.onclick = () => openFlash(m);
+      d.append(t, s, b); list.append(d);
+    });
+  }
+  function openFlash(m) {
+    flashDev = m;
+    $('fl-device').textContent = m.title + ' — поддерживается OpenWrt';
+    msg($('fl-msg'), '');
+    show('flash');
+  }
+  const openURL = u => window.runtime ? window.runtime.BrowserOpenURL(u) : window.open(u);
+  $('fl-info').onclick = () => flashDev && openURL(flashDev.infoUrl);
+  $('fl-selector').onclick = () => flashDev && openURL(flashDev.selectorUrl);
+  $('btn-fl-check').onclick = async () => {
+    if (!flashDev) return;
+    msg($('fl-msg'), 'Считаю контрольную сумму и сверяю с официальной…', 'info');
+    const r = await App().CheckImage(flashDev.id, flashDev.target);
+    if (r.error) { msg($('fl-msg'), r.error); return; }
+    if (!r.ok && !r.types) { msg($('fl-msg'), ''); return; }   // cancelled
+    if (!r.ok) { msg($('fl-msg'), 'Файл НЕ совпадает ни с одной официальной прошивкой этой модели. Не прошивайте им: скачайте заново в выборе прошивки.'); return; }
+    if (r.type === 'factory') msg($('fl-msg'), 'Файл официальный, для этой модели, тип factory — для первой прошивки с заводской. ' + r.name, 'info');
+    else if (r.type === 'sysupgrade')
+      msg($('fl-msg'), 'Файл официальный, но это sysupgrade — для обновления уже стоящего OpenWrt. ' +
+        (r.hasFactory ? 'Для первой прошивки скачайте файл factory.' : 'Простого factory-файла для этой модели нет: первая прошивка делается особым способом — см. страницу устройства.'), 'err');
+    else msg($('fl-msg'), 'Файл официальный, тип «' + r.type + '». Это служебный файл для особого способа установки: используйте его, только если так сказано на странице устройства.', 'err');
+  };
+  $('btn-dry').onclick = () => install(true);
+  $('btn-install').onclick = () => install(false, $('btn-install'));
+  $('btn-real').onclick = () => install(false, $('btn-real'));
+  $('btn-save').onclick = async () => {
+    try {
+      const p = await App().SaveBackup(lastBackup);
+      if (p) msg($('in-msg'), 'Снимок сохранён: ' + p + '. В нём настройки роутера (и хэши паролей): никому его не отправляйте.', 'info');
+    } catch (e) { msg($('in-msg'), 'Не удалось сохранить снимок: ' + e); }
+  };
+  $('btn-done').onclick = async () => { await App().Disconnect(); show('connect'); };
+
+  // ---------- actions ----------
+  async function analyze() {
+    $('items').textContent = ''; $('log').textContent = ''; groupBox = null;
+    $('verdict').className = 'verdict hidden'; msg($('an-msg'), ''); setUpdate('', ''); $('fw-box').classList.add('hidden');
+    $('an-status').classList.remove('hidden'); $('an-status-text').textContent = 'Копирую установщик на роутер…';
+    $('btn-again').disabled = true; $('btn-next').disabled = true;
+    router.platform = ''; router.vpn = []; router.vpnUp = {}; router.tgvia = ''; router.verdict = null; router.ntfy = ''; phase = 'analyze';
+    const r = await App().Analyze();
+    $('an-status').classList.add('hidden');
+    $('btn-again').disabled = false;
+    if (!r.ok) msg($('an-msg'), r.error || 'Анализ не удался');
+    // installation is offered only for platforms the installer can set up
+    $('btn-next').disabled = !(r.ok && ['keenetic', 'openwrt'].includes(router.platform));
+  }
+
+  async function connect() {
+    const host = $('host').value.trim(), port = parseInt($('port').value, 10) || 22;
+    const user = $('user').value.trim() || 'root';
+    if (!host) { msg($('connect-msg'), 'Введите адрес роутера.'); return; }
+    if (!$('pass').value) { msg($('connect-msg'), 'Введите пароль.'); return; }
+    msg($('connect-msg'), ''); busy(true);
+    let r;
+    try { r = await App().Connect(host, port, user, $('pass').value); }
+    finally { $('pass').value = ''; busy(false); }   // the password leaves the window right away
+    $('btn-forget').classList.toggle('hidden', !r.keyChanged);
+    if (!r.ok) { msg($('connect-msg'), r.error); return; }
+    msg($('key-note'), r.newKey
+      ? 'Первое подключение к ' + host + ': запомнил ключ роутера (' + r.fingerprint + '). Если он когда-нибудь изменится, программа предупредит.'
+      : '', 'info');
+    show('analyze');
+    analyze();
+  }
+
+  $('btn-connect').onclick = connect;
+  $('pass').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+  $('btn-again').onclick = analyze;
+  $('btn-disconnect').onclick = async () => { await App().Disconnect(); show('connect'); };
+  $('btn-forget').onclick = async () => {
+    await App().ForgetKey($('host').value.trim(), parseInt($('port').value, 10) || 22);
+    $('btn-forget').classList.add('hidden');
+    msg($('connect-msg'), 'Ключ забыт. Подключитесь снова — программа запомнит новый.', 'info');
+  };
+
+  $('btn-prereq').onclick = () => { fw = load('sb.fw'); renderReq(); show('prereq'); };
+
+  window.addEventListener('load', () => {
+    // first launch: the checklist; later straight to connecting
+    show(load('sb.prereqDone') ? 'connect' : 'prereq');
+    if (!window.go) { msg($('connect-msg'), 'Это окно работает только внутри switchback.exe.', 'info'); return; }
+    window.runtime.EventsOn('sb:event', onEvent);
+    window.runtime.EventsOn('sb:log', onLog);
+    detectRouter();   // also fills in the router's address on the connection screen
+    App().Version().then(v => {
+      $('ver').textContent = 'версия ' + v;
+      // a newer release on GitHub: one line with a link. The program itself downloads nothing.
+      App().CheckUpdate().then(u => {
+        if (!u || !u.newer) return;
+        const a = document.createElement('a');
+        a.href = '#'; a.textContent = 'вышла версия ' + u.latest + ' — открыть страницу загрузки';
+        a.onclick = e => { e.preventDefault(); openURL(u.url); };
+        $('ver').append(' · ', a);
+      }).catch(() => {});
+    });
+  });
+</script>
+</body>
+</html>

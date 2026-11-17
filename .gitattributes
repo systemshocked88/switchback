@@ -1,0 +1,3 @@
+* text=auto
+# Scripts run on the router: Linux line endings only, or sh fails.
+*.sh text eol=lf
