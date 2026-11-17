@@ -1,0 +1,88 @@
+name: Что-то не работает
+description: Установка не прошла, сайты не открываются или бот ведёт себя странно
+title: "[ошибка] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что проверяете switchback! Эту страницу видят все.
+        **Не вставляйте** пароли, токен бота, файлы WireGuard (.conf) и ключи из них, MAC-адреса,
+        адреса своих устройств и полный running-config. Отчёт для диагностики сам вырезает пароли и ключи,
+        но перед отправкой всё равно просмотрите его.
+  - type: input
+    id: router
+    attributes:
+      label: Модель роутера и прошивка
+      placeholder: "например: Keenetic Extra KN-1710, KeeneticOS 4.2 / Xiaomi AX3000T, OpenWrt 24.10"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Платформа
+      options:
+        - Keenetic / Netcraze (Entware)
+        - OpenWrt
+        - Не знаю
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия switchback
+      description: Видна внизу окна программы или в `sh install.sh status`.
+      placeholder: "0.7.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Что не работает
+      multiple: true
+      options:
+        - Установка с нуля
+        - Программа switchback.exe
+        - YouTube / zapret
+        - «Подобрать zapret»
+        - Telegram / Instagram / туннель WireGuard
+        - Туннели из архивов («Проверить и добавить», wg-batch)
+        - ChatGPT / Claude
+        - Бот в Telegram
+        - Другое
+  - type: textarea
+    id: did
+    attributes:
+      label: Что делали
+      description: По шагам — какие кнопки нажимали или какие команды вводили.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Чего ждали
+    validations:
+      required: true
+  - type: textarea
+    id: got
+    attributes:
+      label: Что получилось
+      description: Текст ошибки или сообщения бота, можно снимок экрана.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Отчёт или журнал
+      description: |
+        Лучше всего — отчёт для диагностики: боту кнопка «Отчёт» (`/report`), в программе «Статус» →
+        «Отчёт для диагностики» или `sh install.sh report`. Можно приложить файл.
+        Или последние строки журнала `/opt/var/log/switchback.log`.
+        Перед вставкой уберите ключи, токены, MAC-адреса и адреса своих устройств.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Проверка
+      options:
+        - label: В тексте и вложениях нет паролей, токена бота, ключей WireGuard и MAC-адресов
+          required: true
