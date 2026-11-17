@@ -1,0 +1,56 @@
+name: Telegram / туннели WireGuard
+description: Не работает Telegram или Instagram, туннель не поднимается, не переключается на запасной
+title: "[туннель] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Эту страницу видят все. **Не выкладывайте** файлы WireGuard (.conf), ключи и адреса серверов из них,
+        пароли, токен бота, MAC-адреса и адреса своих сайтов.
+  - type: input
+    id: router
+    attributes:
+      label: Модель роутера и версия switchback
+      placeholder: "например: Keenetic Extra KN-1710, switchback 0.7.5"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: Что не работает
+      description: Например, «Telegram не грузит фото», «не переключается на запасной», «Проверить и добавить не нашёл ни одного».
+    validations:
+      required: true
+  - type: dropdown
+    id: count
+    attributes:
+      label: Сколько туннелей WireGuard
+      options:
+        - "1"
+        - "2–3"
+        - "4 и больше"
+        - Не знаю
+  - type: dropdown
+    id: handshake
+    attributes:
+      label: Есть ли рукопожатие (handshake)
+      description: Видно в отчёте или в ответе бота на кнопку «Туннели».
+      options:
+        - Есть
+        - Нет
+        - Не знаю
+  - type: textarea
+    id: report
+    attributes:
+      label: Отчёт
+      description: |
+        Кнопка «Отчёт» в боте, в программе «Статус» → «Отчёт для диагностики» или `sh install.sh report`.
+        Ключи в нём вырезаны, но перед отправкой просмотрите его.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Проверка
+      options:
+        - label: В тексте и вложениях нет файлов .conf, ключей, паролей, токена бота, MAC-адресов и моих сайтов
+          required: true

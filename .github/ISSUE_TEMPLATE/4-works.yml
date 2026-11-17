@@ -1,0 +1,47 @@
+name: Проверено на моём роутере
+description: Всё поставилось и работает — расскажите, на каком роутере (для списка проверенных)
+title: "[работает] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо! Такие отчёты попадут в список проверенных роутеров. Эту страницу видят все:
+        **не выкладывайте** пароли, токен бота, файлы WireGuard, MAC-адреса и адреса своих сайтов.
+  - type: input
+    id: router
+    attributes:
+      label: Модель роутера
+      placeholder: "например: Keenetic Hopper KN-3810"
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Прошивка и её версия
+      placeholder: "например: KeeneticOS 4.2.3 / OpenWrt 24.10.0"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия switchback
+      placeholder: "0.7.5"
+    validations:
+      required: true
+  - type: checkboxes
+    id: installed
+    attributes:
+      label: Что ставили
+      options:
+        - label: zapret (YouTube, Discord)
+        - label: VPN-туннель WireGuard (Telegram, Instagram)
+        - label: DNS для ChatGPT и Claude
+        - label: Сторож и бот в Telegram
+        - label: Запасные туннели / туннели из архивов
+  - type: textarea
+    id: works
+    attributes:
+      label: Что работает
+      description: На каких устройствах проверили (телефон, телевизор, компьютер), что открывается, были ли сложности.
+    validations:
+      required: true

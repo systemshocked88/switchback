@@ -1,0 +1,62 @@
+name: Не открывается сайт / YouTube
+description: Сайт не открывается, YouTube тормозит или не грузит видео
+title: "[сайт] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Эту страницу видят все. **Не выкладывайте** пароли, токен бота, файлы WireGuard (.conf) и ключи
+        из них, MAC-адреса и адреса своих сайтов и устройств. Отчёт для диагностики сам вырезает пароли
+        и ключи, но перед отправкой всё равно просмотрите его.
+  - type: input
+    id: site
+    attributes:
+      label: Какой сайт
+      placeholder: "например: YouTube, Instagram, ChatGPT"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: С какого устройства
+      placeholder: "например: телефон Android по Wi-Fi, телевизор, компьютер"
+    validations:
+      required: true
+  - type: dropdown
+    id: way
+    attributes:
+      label: Как этот сайт должен открываться
+      options:
+        - Напрямую (zapret) — YouTube, Discord
+        - Через VPN-туннель — Telegram, Instagram
+        - Через DNS — ChatGPT, Claude
+        - Не знаю
+  - type: input
+    id: router
+    attributes:
+      label: Модель роутера и версия switchback
+      placeholder: "например: Keenetic Extra KN-1710, switchback 0.7.5"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: Что происходит
+      description: Что видите на экране; с какого времени; помогла ли перезагрузка роутера.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Отчёт
+      description: |
+        Кнопка «Отчёт» в боте, в программе «Статус» → «Отчёт для диагностики» или `sh install.sh report`
+        на роутере. Можно приложить файлом. Перед вставкой уберите ключи, токены, MAC-адреса и свои сайты.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Проверка
+      options:
+        - label: В тексте и вложениях нет паролей, токена бота, ключей WireGuard, MAC-адресов и моих сайтов
+          required: true
