@@ -1,0 +1,6 @@
+# ChatGPT's domains asked from the DNS proxy service.
+# One entry per line; "#" starts a comment, blank lines are skipped.
+chatgpt.com
+openai.com
+oaistatic.com
+oaiusercontent.com

@@ -23,7 +23,7 @@ type DNSPreset struct {
 	Name     string   `json:"name"`
 	Note     string   `json:"note"`
 	Services []string `json:"services"` // chatgpt, claude
-	Kind     string   `json:"kind"`     // dot (Keenetic) | doh (OpenWrt)
+	Kind     string   `json:"kind"`     // dot (Keenetic) | doh (OpenWrt) | zdns (Keenetic: Zapret DNS through the AI reserve, answers key ai_reserve)
 	IP       string   `json:"ip"`
 	SNI      string   `json:"sni"`
 	DoH      string   `json:"doh"`
@@ -36,6 +36,10 @@ var dnsPresets = []DNSPreset{
 		Kind: "dot", IP: "143.20.64.55", SNI: "dns.bezmezhau.com"},
 	{ID: "zapretdns", Name: "Zapret DNS", Note: "ChatGPT, Claude и Gemini — рекомендуется", Services: []string{"chatgpt", "claude"},
 		Kind: "doh", DoH: "https://dns.zapret.moe/dns-query"},
+	// Keenetic takes no DoH per domain from switchback: the AI reserve on the router asks Zapret DNS through zapret
+	// and pins the addresses, with spare addresses and VPN behind it (lib/ai.sh). GeoHide went silent on 18.11.2026.
+	{ID: "zapretdns-job", Name: "Zapret DNS", Note: "ChatGPT и Claude сразу: резерв для нейросетей — Zapret DNS, запасные адреса, VPN; роутер сам выбирает рабочий путь",
+		Services: []string{"chatgpt", "claude"}, Kind: "zdns", DoH: "https://dns.zapret.moe/dns-query"},
 }
 
 // DNSPresets: the services that fit this firmware (Keenetic takes DoT, OpenWrt DoH).
@@ -46,7 +50,7 @@ func (a *App) DNSPresets(platform string) []DNSPreset {
 	}
 	out := []DNSPreset{}
 	for _, p := range dnsPresets {
-		if p.Kind == kind {
+		if p.Kind == kind || (kind == "dot" && p.Kind == "zdns") {
 			out = append(out, p)
 		}
 	}

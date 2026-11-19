@@ -11,7 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const appVersion = "0.7.5"
+const appVersion = "0.7.6"
 
 // App holds the methods the window can call (window.go.main.App.*).
 type App struct {

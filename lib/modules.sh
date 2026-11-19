@@ -33,7 +33,7 @@ mod_https() {
 }
 
 # ---------- 2. zapret ----------
-ZAPRET_DOMAINS="instagram.com cdninstagram.com fbcdn.net facebook.com facebook.net fb.com fbsbx.com"
+# ZAPRET_DOMAINS: lists/zapret.domains (lists_load in lib/common.sh)
 
 conf_set() {   # conf_set KEY VALUE in $NFQ_CONF
   if grep -qx "$1=$2" "$NFQ_CONF" 2>/dev/null; then skip "$1 уже $2"; return; fi
@@ -58,6 +58,7 @@ mod_zapret() {
     if [ "$DRY" = 1 ]; then dry "отдельные способы zapret для серверов видео YouTube"
     else nfq_set_key "$NFQ_CONF" NFQWS_ARGS_CUSTOM "$(tune_video_args)"; ok "отдельные способы для серверов видео YouTube"; fi
   fi
+  quic_default || :          # QUIC (the YouTube app on a phone): the package's way gives way to a working one (lib/tune.sh)
   for d in $ZAPRET_DOMAINS; do
     grep -qx "$d" "$NFQ_LIST" 2>/dev/null && continue
     append_line "$NFQ_LIST" "$d"; remember "list $d"
@@ -73,7 +74,7 @@ mod_zapret() {
   fi
   pf_zapret_prepare      # platform: e.g. turn off hardware offloading that bypasses zapret
   pf_zapret_restart
-  if [ "$DRY" = 1 ] || pf_zapret_running; then ok "zapret работает"; else fail "zapret не запустился после настройки"; fi
+  if [ "$DRY" = 1 ] || zapret_wait; then ok "zapret работает"; else fail "zapret не запустился после настройки"; fi
   own_install
   say ""
   say "  Приложение YouTube (телевизор, приставка, телефон) ходит за видео по QUIC (UDP 443). Провайдер такой"
@@ -165,8 +166,8 @@ own_off() {
 }
 
 # ---------- 3. DNS per service ----------
-DNS_CHATGPT="chatgpt.com openai.com oaistatic.com oaiusercontent.com"
-DNS_CLAUDE="claude.ai claude.com claudeusercontent.com anthropic.com"
+# DNS_CHATGPT: lists/chatgpt.domains (lists_load in lib/common.sh)
+# DNS_CLAUDE: lists/claude.domains (lists_load in lib/common.sh)
 
 mod_dns() {
   hr "DNS по сервисам: ChatGPT, Claude"
@@ -204,6 +205,7 @@ mod_dns() {
     done
   done
   save_if_changed
+  ai_ask                 # the AI reserve: other paths when the DNS service dies (lib/ai.sh); off unless asked
   if [ "$swapped" = 1 ]; then
     say "  Сервис закреплён за узлом прежнего DNS-сервиса, пока автосмена узлов не выберет новый."
     say "  Чтобы выбрать сразу — команды боту: /node best, /node api best (Claude), /node gpt best (ChatGPT)."
@@ -211,10 +213,7 @@ mod_dns() {
 }
 
 # ---------- 4. Telegram via VPN ----------
-# Official IPv4 list: https://core.telegram.org/resources/cidr.txt
-TG_NETS="91.108.56.0/255.255.252.0 91.108.4.0/255.255.252.0 91.108.8.0/255.255.252.0
-91.108.16.0/255.255.252.0 91.108.12.0/255.255.252.0 149.154.160.0/255.255.240.0
-91.105.192.0/255.255.254.0 91.108.20.0/255.255.252.0 185.76.151.0/255.255.255.0"
+# TG_NETS: lists/telegram.nets (lists_load in lib/common.sh)
 
 tg_via() {   # the connection any Telegram network is already routed through (by switchback or by hand)
   for n in $TG_NETS; do
@@ -277,13 +276,16 @@ install_file() {   # install_file DEST "what" SRC [answer-key]
 # ---------- 5. watchdog + weekly backup ----------
 mod_watchdog() {
   hr "Сторож в Telegram и еженедельный бэкап"
-  pf_cron_setup || fail "не удалось поставить curl/cron"
   ntfy_want                  # sets NTFY_URL: the reserve channel (or "")
+  # nothing to send alerts to: skip before touching the scheduler (no cron lines to scripts we do not write, no curl)
+  if ! { [ -s "$BOT" ] && grep -q '^CHAT=[0-9-]' "$BOT"; } && [ -n "$ANSWERS" ] && ! ans_has bot_token &&
+     [ -z "$NTFY_URL" ] && ! grep -q '^NTFY=.' "$BOT" 2>/dev/null; then
+    warn "в ответах нет ни токена бота (bot_token), ни ntfy (ntfy_url): сторож и бэкап пропущены"; return 0
+  fi
+  pf_cron_setup || fail "не удалось поставить curl/cron"
   if [ -s "$BOT" ] && grep -q '^CHAT=[0-9-]' "$BOT"; then skip "бот уже настроен"
   elif [ -n "$ANSWERS" ] && ! ans_has bot_token && { [ -n "$NTFY_URL" ] || grep -q '^NTFY=.' "$BOT" 2>/dev/null; }; then
     skip "бота нет: уведомления только через ntfy (команды /status и другие — только у бота)"
-  elif [ -n "$ANSWERS" ] && ! ans_has bot_token; then
-    warn "в ответах нет ни токена бота (bot_token), ни ntfy (ntfy_url): сторож и бэкап пропущены"; return 0
   elif [ "$DRY" = 1 ]; then dry "запросить токен бота и номер чата, записать $BOT"
   else
     if ans_has bot_token; then T=$(ans bot_token)
@@ -329,7 +331,13 @@ mod_watchdog() {
 # directly, so the scripts send there when Telegram does not answer. The channel is a long random name:
 # whoever knows it can read the alerts (short texts like "DOWN: zapret", no passwords or addresses).
 ntfy_valid() { case $1 in https://*/*) t=${1##*/}; [ ${#t} -ge 12 ] && case $t in *[!A-Za-z0-9_-]*) false ;; esac ;; *) false ;; esac; }
-ntfy_new() { echo "https://ntfy.sh/sb-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"; }
+# 24 random hex digits; busybox on OpenWrt has no od, so hexdump first, then od, then plain tr
+ntfy_new() {
+  r=$(head -c 12 /dev/urandom 2>/dev/null | hexdump -v -e '/1 "%02x"' 2>/dev/null)
+  [ ${#r} -ge 24 ] || r=$(head -c 12 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+  [ ${#r} -ge 24 ] || r=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 24)
+  echo "https://ntfy.sh/sb-$r"
+}
 ntfy_want() {
   NTFY_URL=""
   if grep -q '^NTFY=.' "$BOT" 2>/dev/null; then return 0; fi    # already there: kept as it is
@@ -419,8 +427,9 @@ watchdog_checks() {
   echo "check zapret      zapret_up"
   echo "check free-memory mem_ok"
   { [ -n "$VPN_IF" ] || [ -n "$(tg_via)" ]; } && echo "check telegram-vpn web https://api.telegram.org"
-  pf_dns_has claude.ai && printf '%s\n' "check claude-site web https://claude.ai" "check claude-app  web https://api.anthropic.com"
-  pf_dns_has chatgpt.com && echo "check chatgpt     web https://chatgpt.com"
+  # with the AI reserve on, its own job watches them (and acts): no second alarm
+  ! ai_on && pf_dns_has claude.ai && printf '%s\n' "check claude-site web https://claude.ai" "check claude-app  web https://api.anthropic.com"
+  ! ai_on && pf_dns_has chatgpt.com && echo "check chatgpt     web https://chatgpt.com"
   meta_on && echo "check instagram   web https://www.instagram.com"
   return 0
 }
@@ -454,6 +463,8 @@ hint() {
     free-memory) echo "Если памяти не хватит, zapret упадёт. Обычно проходит само; не пройдёт за час — перезагрузите роутер." ;;
     telegram-vpn) echo "Туннель VPN не отвечает. Автосмена сама попробует запасной; если сообщения о переключении не будет — нужен новый конфиг WireGuard." ;;
     instagram) echo "Instagram идёт через VPN — скорее всего, дело в туннеле. Обычно проходит само." ;;
+    # 18.11.2026 "usually passes by itself" was all it said while Claude was down for 10 hours
+    claude-site|claude-app|chatgpt) echo "Скорее всего, перестал работать DNS-сервис для нейросетей (так было 18.11: Claude лежал 10 часов). Сам роутер путь не меняет: резерв для нейросетей выключен. Включите его командой боту /ai — тогда роутер сам перейдёт на Zapret DNS, запасные адреса или VPN и напишет; там же кнопка «Claude через VPN»." ;;
     *) echo "Часто это сбой самого сервиса или его DNS — обычно проходит само. Не прошло за час — нажмите в боте «Что-то не работает»." ;;
   esac
 }
@@ -528,7 +539,7 @@ printf '%s\n' "$1"
 verify() {
   hr "Проверка после установки"
   [ "$DRY" = 1 ] && { say "  (в пробном режиме не проверяется)"; return; }
-  case " $MODULES " in *" zapret "*) if pf_zapret_running; then ok "zapret работает"; else bad "zapret не работает"; fi ;; esac
+  case " $MODULES " in *" zapret "*) if zapret_wait; then ok "zapret работает"; else bad "zapret не работает"; fi ;; esac
   case " $MODULES " in *" vpn "*)
     if [ -n "$VPN_IF" ]; then
       c=$(curl -s -o /dev/null --max-time 15 -w '%{http_code}' https://api.telegram.org 2>/dev/null)

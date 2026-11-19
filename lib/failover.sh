@@ -6,11 +6,11 @@
 
 mod_failover() {
   hr "Автосмена VPN-туннеля"
-  command -v pf_failover_funcs >/dev/null 2>&1 || { skip "на этой прошивке автосмена пока не поддерживается"; return 0; }
+  command -v pf_failover_funcs >/dev/null 2>&1 || { mod_skip "на этой прошивке автосмена пока не поддерживается"; return 0; }
   ifs=$(pf_vpn_ifaces)
   n=$(echo $ifs | wc -w)
   if [ "$n" -lt 2 ]; then
-    skip "нужно хотя бы два подключения WireGuard (основное и запасное), найдено: $n"; pf_vpn_hint; return 0
+    mod_skip "нужно хотя бы два подключения WireGuard (основное и запасное), найдено: $n"; pf_vpn_hint; return 0
   fi
   say "  Если основной туннель перестанет пропускать трафик, маршруты (Telegram, Meta и др.) сами"
   say "  переедут на первый работающий запасной. Запасные держатся выключенными: VPN-сервисы часто"

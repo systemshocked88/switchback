@@ -12,9 +12,14 @@
 #   wg-import   create a WireGuard connection from a .conf file (--conf FILE [--name NAME] [--standby])
 #   wg-batch    many servers at once: check each, keep the working ones as standbys (--conf ZIP|FILE|DIR [--keep N])
 #   sites       own sites in the bypass: sites [list] | add DOMAIN --via zapret|dns|vpn | del DOMAIN | check DOMAIN
+#               sites doctor DOMAIN: why a site does not open, step by step, and what fixes it
 #   update      replace switchback's copy on the router and its scripts with this version (settings kept)
+#   lists       lists [status] | put (new lists on stdin; rolls back by itself if worse) | apply | restore (the previous ones back)
+#   panel       a page for phones at home: panel on|off|status|link|token (off by default)
+#   ai          reserve for Claude and ChatGPT: ai on|off|status | via vpn|zdns|proxy|dns [HOURS] | auto | next
 #   tune        pick the best zapret settings for this provider (--undo: back to the ones before;
-#               tune video on|off: ways of their own for YouTube video servers)
+#               tune video on|off: ways of their own for YouTube video servers;
+#               tune quic status|next|undo: the way for QUIC, the YouTube app on a phone)
 #
 # Options:
 #   --dry-run          show what would be done, change nothing
@@ -26,7 +31,7 @@
 #
 # Supported: Keenetic / Netcraze (KeeneticOS + Entware), OpenWrt (opkg or apk).
 
-VERSION=0.7.5
+VERSION=0.7.6
 SB_SRC=$(cd "$(dirname "$0")" && pwd)
 OPT=${SB_OPT:-/opt}                       # overridable for tests only
 export PATH=$OPT/sbin:$OPT/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -35,8 +40,8 @@ CMD=install; DRY=0; PROFILE=""; ASSUME_YES=0; PLAIN=0; ANSWERS=""; PROGRESS=0; C
 SITES_ARGS=""; SITE_VIA=""; SITE_DNS_LIKE=""; TUNE_UNDO=0; CMD_SET=0
 while [ $# -gt 0 ]; do
   case $1 in
-    install|doctor|uninstall|status|wg-import|wg-batch|sites|update|tune|act)
-      if [ "$CMD_SET" = 1 ] && [ "$CMD" = sites ]; then SITES_ARGS="$SITES_ARGS $1"   # e.g. "sites check update.example"
+    install|doctor|uninstall|status|wg-import|wg-batch|sites|update|tune|act|lists|panel|ai)
+      if [ "$CMD_SET" = 1 ] && { [ "$CMD" = sites ] || [ "$CMD" = tune ] || [ "$CMD" = ai ]; }; then SITES_ARGS="$SITES_ARGS $1"   # e.g. "sites check update.example", "tune quic status", "ai status" (the bot's /ai: not the router's whole status)
       else CMD=$1; CMD_SET=1; fi ;;
     --via) SITE_VIA=$2; shift ;;
     --dns-like) SITE_DNS_LIKE=$2; shift ;;
@@ -54,9 +59,9 @@ while [ $# -gt 0 ]; do
     --answers=*) ANSWERS=${1#*=} ;;
     --progress) PROGRESS=1; PLAIN=1 ;;
     --plain) PLAIN=1 ;;
-    --help|-h) sed -n '2,27p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,31p' "$0"; exit 0 ;;
     -*) echo "Неизвестный параметр: $1 (см. --help)"; exit 2 ;;
-    *) if [ "$CMD" = sites ] || [ "$CMD" = act ] || [ "$CMD" = tune ]; then SITES_ARGS="$SITES_ARGS $1"
+    *) if [ "$CMD" = sites ] || [ "$CMD" = act ] || [ "$CMD" = tune ] || [ "$CMD" = lists ] || [ "$CMD" = panel ] || [ "$CMD" = ai ]; then SITES_ARGS="$SITES_ARGS $1"
        else echo "Неизвестный параметр: $1 (см. --help)"; exit 2; fi ;;
   esac
   shift
@@ -68,10 +73,11 @@ BACKUP_DIR=""
 VPN_IF=""
 STEP=""; STEPS=""; SUMMARY=""
 
-for f in common ui detect doctor modules uninstall status wireguard failover nodes report app sites bot tune meta digest heal; do
+for f in common ui detect doctor modules uninstall status wireguard failover nodes report app sites bot tune meta digest heal panel ai; do
   [ -f "$SB_SRC/lib/$f.sh" ] || { echo "Не найден lib/$f.sh: запускайте install.sh из папки проекта целиком"; exit 1; }
   . "$SB_SRC/lib/$f.sh"
 done
+lists_load "$SB_SRC/lists" || exit 1
 ui_init
 if [ -n "$ANSWERS" ]; then
   load_answers "$ANSWERS"
@@ -87,7 +93,7 @@ detect_platform
 ev platform "$PLATFORM"
 case $CMD in install) what="установка" ;; doctor) what="анализ роутера" ;; uninstall) what="откат" ;;
   status) what="статус" ;; wg-import) what="WireGuard из файла" ;; wg-batch) what="туннели из архивов" ;; report) what="отчёт для диагностики" ;;
-  sites) what="свои сайты" ;; update) what="обновление" ;; tune) what="подбор настроек zapret" ;; act) what="действие" ;; esac
+  sites) what="свои сайты" ;; update) what="обновление" ;; lists) what="списки" ;; panel) what="панель" ;; ai) what="резерв для нейросетей" ;; tune) what="подбор настроек zapret" ;; act) what="действие" ;; esac
 mode=""; [ "$DRY" = 1 ] && mode=" · пробный прогон, ничего не меняется"
 banner "switchback $VERSION  ·  обход блокировок на роутере" "$(platform_title "$PLATFORM")  ·  $what$mode"
 
@@ -112,7 +118,10 @@ case $CMD in
   report)    do_report; exit $? ;;
   sites)     do_sites; exit $? ;;
   update)    do_update; exit $? ;;
-  tune)      do_tune; exit $? ;;
+  lists)     do_lists; exit $? ;;
+  panel)     do_panel; exit $? ;;
+  ai)        do_ai; exit $? ;;
+  tune)     do_tune; exit $? ;;
   act)       do_act; exit $? ;;
 esac
 
@@ -150,6 +159,7 @@ title_of() {
     failover) echo "Автосмена VPN-туннеля" ;;
     meta) echo "Instagram, Facebook, WhatsApp через VPN" ;;
     nodes) echo "Claude: быстрый узел и запрет QUIC" ;;
+    panel) echo "Панель на роутере (страница для телефона)" ;;
   esac
 }
 case $PROFILE in
@@ -160,11 +170,12 @@ case $PROFILE in
   custom)
     MODULES=""
     if ans_has modules; then
-      for m in https zapret dns nodes vpn meta watchdog failover; do   # keep the safe order whatever order the file uses
+      for m in https zapret dns nodes vpn meta watchdog failover panel; do   # keep the safe order whatever order the file uses
         case " $(ans modules) " in *" $m "*) MODULES="$MODULES $m" ;; esac
       done
     else
       for m in https zapret dns nodes vpn meta watchdog failover; do yes_no "  $(title_of $m)?" y && MODULES="$MODULES $m"; done
+      yes_no "  $(title_of panel)?" n && MODULES="$MODULES panel"
     fi ;;
   *) say "Неизвестный профиль: $PROFILE"; exit 2 ;;
 esac
@@ -185,12 +196,13 @@ STEPS=$(echo $MODULES | wc -w); STEP=0
 for m in $MODULES; do
   STEP=$((STEP+1))
   ev step "$STEP" "$STEPS" "$m" "$(title_of $m)"
-  before=$(wc -l < "$RUN_JOURNAL"); w0=$WARNINGS
+  before=$(wc -l < "$RUN_JOURNAL"); w0=$WARNINGS; MOD_SKIP=0
   "mod_$m"
   changed=$(( $(wc -l < "$RUN_JOURNAL") - before ))
   if [ "$DRY" = 1 ]; then summary_add skip "$(title_of $m)" "пробный прогон"
   elif [ "$WARNINGS" -gt "$w0" ]; then summary_add warn "$(title_of $m)" "есть предупреждения, см. выше"
   elif [ "$changed" -gt 0 ]; then summary_add ok "$(title_of $m)" "изменений: $changed"
+  elif [ "$MOD_SKIP" = 1 ]; then summary_add skip "$(title_of $m)" "пропущено, см. выше"
   else summary_add skip "$(title_of $m)" "уже было настроено"; fi
 done
 STEP=""

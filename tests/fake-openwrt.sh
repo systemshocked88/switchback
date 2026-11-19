@@ -58,25 +58,50 @@ cp "$R/uci.db.seed" "$R/uci.db"
 
 # --- packages ---
 : > "$R/pkgs.db"
+# https-dns-proxy's init, like the real one: start with dnsmasq_config_update='*' takes over all DNS of
+# dnsmasq (noresolv=1, servers 127.0.0.1#5053/#5054, a backup); only "stop" gives it back. "restart" is a
+# reload: it never stops (that is what left the real router's DNS taken over, VM 2026-11-17)
+cat > "$R/hdp-init" <<'EOF'
+#!/bin/sh
+echo "https-dns-proxy $*" >> "$SB_ROOT/svc.log"
+DB=$SB_ROOT/uci.db; k=dhcp.@dnsmasq[0]
+take() {
+  awk -F'\t' '$1=="https-dns-proxy.config.dnsmasq_config_update" {v=$2} END {exit !(v=="*")}' "$DB" || return 0
+  grep -q "^$k.doh_backup_noresolv	" "$DB" && return 0
+  printf '%s.doh_backup_noresolv\t-1\n%s.noresolv\t1\n%s.server\t127.0.0.1#5053\n%s.server\t127.0.0.1#5054\n' "$k" "$k" "$k" "$k" >> "$DB"
+}
+give_back() {
+  awk -F'\t' -v k="$k" '!($1==k".doh_backup_noresolv" || $1==k".noresolv" || ($1==k".server" && $2 ~ /^127\.0\.0\.1#505[34]$/))' "$DB" > "$DB.t"
+  mv "$DB.t" "$DB"
+}
+case $1 in start) take ;; stop) give_back ;; restart|reload) take ;; esac
+exit 0
+EOF
 cat > "$R/bin/opkg" <<'EOF'
 #!/bin/sh
 echo "opkg $*" >> "$SB_ROOT/pkg.log"
 case $1 in
   print-architecture) printf 'arch all 1\narch aarch64_cortex-a53 10\n' ;;
   list-installed) sed 's/$/ - 1.0/' "$SB_ROOT/pkgs.db" ;;
-  install) shift; for p in "$@"; do echo "$p" >> "$SB_ROOT/pkgs.db"
+  install) shift; for p in "$@"; do grep -qx "$p" "$SB_ROOT/pkgs.db" || echo "$p" >> "$SB_ROOT/pkgs.db"
       case $p in
-        nfqws2-keenetic) mkdir -p "$SB_ROOT/etc/nfqws2/lists"
+        nfqws2-keenetic) # like the real feed package: it pulls the legacy iptables stack in
+          for d in iptables-zz-legacy kmod-ipt-nfqueue; do grep -qx "$d" "$SB_ROOT/pkgs.db" || echo "$d" >> "$SB_ROOT/pkgs.db"; done
+          mkdir -p "$SB_ROOT/etc/nfqws2/lists"
           printf 'NFQWS_EXTRA_ARGS="$MODE_AUTO"\nUDP_PORTS=443\n' > "$SB_ROOT/etc/nfqws2/nfqws2.conf"
           : > "$SB_ROOT/etc/nfqws2/lists/user.list"
           printf '#!/bin/sh\necho "nfqws2 $*" >> "$SB_ROOT/svc.log"\n' > "$SB_ROOT/etc/init.d/nfqws2-keenetic"; chmod +x "$SB_ROOT/etc/init.d/nfqws2-keenetic" ;;
-        https-dns-proxy) printf '#!/bin/sh\necho "https-dns-proxy $*" >> "$SB_ROOT/svc.log"\n' > "$SB_ROOT/etc/init.d/https-dns-proxy"; chmod +x "$SB_ROOT/etc/init.d/https-dns-proxy" ;;
+        https-dns-proxy) cp "$SB_ROOT/hdp-init" "$SB_ROOT/etc/init.d/https-dns-proxy"; chmod +x "$SB_ROOT/etc/init.d/https-dns-proxy"
+          "$SB_ROOT/etc/init.d/https-dns-proxy" start >/dev/null ;;   # postinst starts it with the default config
       esac; done ;;
-  remove) grep -vx "$2" "$SB_ROOT/pkgs.db" > "$SB_ROOT/pkgs.t"; mv "$SB_ROOT/pkgs.t" "$SB_ROOT/pkgs.db" ;;
+  remove) # a package another installed one depends on is refused, like the real opkg
+    case $2 in iptables-zz-legacy|kmod-ipt-nfqueue) grep -qx nfqws2-keenetic "$SB_ROOT/pkgs.db" && { echo "dependent packages" >&2; exit 255; } ;; esac
+    [ "$2" = https-dns-proxy ] && [ -x "$SB_ROOT/etc/init.d/https-dns-proxy" ] && "$SB_ROOT/etc/init.d/https-dns-proxy" stop   # prerm
+    grep -vx "$2" "$SB_ROOT/pkgs.db" > "$SB_ROOT/pkgs.t"; mv "$SB_ROOT/pkgs.t" "$SB_ROOT/pkgs.db" ;;
 esac
 exit 0
 EOF
-printf '#!/bin/sh\necho "opkg-key $*" >> "$SB_ROOT/pkg.log"\n' > "$R/bin/opkg-key"
+printf '#!/bin/sh\necho "opkg-key $*" >> "$SB_ROOT/pkg.log"\nmkdir -p "$SB_ROOT/etc/opkg/keys"; : > "$SB_ROOT/etc/opkg/keys/96e4a10c3f9d405d"\n' > "$R/bin/opkg-key"
 cat > "$R/bin/wget" <<'EOF'
 #!/bin/sh
 while [ $# -gt 0 ]; do [ "$1" = -O ] && { shift; : > "$1"; }; shift; done; exit 0

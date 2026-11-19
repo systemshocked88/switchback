@@ -29,11 +29,11 @@ nodes_list() {
 
 mod_nodes() {
   hr "Claude: быстрый узел и запрет QUIC"
-  command -v pf_nodes_funcs >/dev/null 2>&1 || { skip "на этой прошивке пока не поддерживается"; return 0; }
+  command -v pf_nodes_funcs >/dev/null 2>&1 || { mod_skip "на этой прошивке пока не поддерживается"; return 0; }
   nodes=$(nodes_list)
   n=$(echo $nodes | wc -w)
   if [ "$n" -lt 2 ]; then
-    skip "DNS для Claude отдаёт узлов: $n — переключать не между чем (нужен DNS-сервис с несколькими узлами, модуль «DNS»)"
+    mod_skip "DNS для Claude отдаёт узлов: $n — переключать не между чем (нужен DNS-сервис с несколькими узлами, модуль «DNS»)"
     return 0
   fi
   ok "узлов у DNS-сервиса: $n ($(echo $nodes))"
@@ -52,6 +52,9 @@ mod_nodes() {
     cur=$(pf_host_pinned "$probe")
     if [ -n "$cur" ]; then skip "${g%%:*}: $probe уже закреплён за $cur (дальше следит автосмена)"; continue; fi
     gn=$nodes; [ "${g%%:*}" = gpt ] && gn=$(NODES_PROBE=$NODES_GPT_PROBE nodes_list)
+    if [ "$DRY" = 1 ] && ! command -v curl >/dev/null 2>&1; then   # curl comes with the real run
+      dry "${g%%:*}: измерить узлы и закрепить самый быстрый"; continue
+    fi
     best=$(sh "$tmp" --best "$probe" $gn)
     [ -n "$best" ] || { warn "${g%%:*}: ни один узел не ответил, закрепление пропущено"; continue; }
     for d in $domains; do pf_host_pin "$d" "$best" || fail "роутер не принял закрепление $d"; done
@@ -90,6 +93,13 @@ export PATH=__PATH__
 GROUPS="web:claude.ai,claudeusercontent.com api:api.anthropic.com,a-api.anthropic.com"
 PROBE=claude.com; SLOW=300; SLOW_RUNS=5; DEAD_RUNS=3; GAIN=2; RETRY=15; EXTRA_DOH=""; OWN=""
 [ -f __CONF__/nodes.conf ] && . __CONF__/nodes.conf
+# the AI reserve (lib/ai.sh) moved a group to another path (Zapret DNS, a spare address, VPN): its pins are the
+# reserve's then, and moving them to the DNS service's nodes would undo it. ai_away GROUP (web, api, gpt)
+ai_away() {
+  case $1 in gpt) a=gpt ;; *) a=claude ;; esac
+  c=$(cat __STATE__/ai-path/cur.$a 2>/dev/null)
+  [ -f __CONF__/ai.conf ] && [ -n "$c" ] && [ "$c" != dns ]
+}
 S=__STATE__/claude-nodes
 LOG=$S/log
 BOT=__BOT__
@@ -132,6 +142,13 @@ extra_nodes() {
 is_extra() { case " $(echo $XNODES) " in *" $1 "*) return 0 ;; esac; return 1; }
 is_own() { case " $OWN " in *" $1 "*) return 0 ;; esac; return 1; }
 svc() { case $1 in gpt) echo ChatGPT ;; *) echo Claude ;; esac; }
+# what IP: "узел IP" for a node of the DNS service; a spare proxy of the AI reserve (lists/ai-*-proxies.nets,
+# the service after "#") is named so: "узел 161.104.89.59 снова отвечает" was read as "GeoHide is back" (19.11.2026)
+what() {
+  l=$(cat __CONF__/app/lists/ai-*-proxies.nets 2>/dev/null | awk -v ip="$1/32" '$1 == ip {
+        n = index($0, "#"); s = n ? substr($0, n + 1) : ""; gsub(/^[ \t]+|[ \t]+$/, "", s); print (s != "" ? s : "резерва"); exit }')
+  if [ -n "$l" ]; then echo "прокси $l $1 (не узел DNS-сервиса)"; else echo "узел $1"; fi
+}
 ip4() { grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; }
 dns_ips() { nslookup "$1" 127.0.0.1 2>/dev/null | awk '/^Name:/ {n=1}
   n && /^Address/ { for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; break } }' | grep -v '^127\.'; }
@@ -169,7 +186,7 @@ group() {   # group NAME "DOMAINS" (the first domain is measured)
   if [ "$ms" -le "$slow" ] && [ $DRY = 0 ]; then
     [ -f "$bad" ] && log "$name: $cur ${ms}ms ok again ($(cat "$bad") reset)"
     # there was an alert: say it is over, so nobody keeps worrying
-    [ -f "$S/$name.dead.sent" ] && send "$(svc "$name") ($name): узел $cur снова отвечает (${ms} мс). Делать ничего не нужно."
+    [ -f "$S/$name.dead.sent" ] && send "$(svc "$name") ($name): $(what "$cur") снова отвечает (${ms} мс). Делать ничего не нужно."
     rm -f "$bad" "$S/$name.dead.sent" "$S/$name.last_scan"; return
   fi
   [ $DRY = 1 ] && echo "$name: current $cur ${ms}ms (dry run: full scan anyway)"
@@ -209,7 +226,7 @@ group() {   # group NAME "DOMAINS" (the first domain is measured)
         if [ -z "$best" ] && [ -z "$noquic" ]; then
           send "✗ $(svc "$name") ($name) не отвечает ни через один узел, хотя интернет есть: похоже, сбой у самого сервиса или его DNS. Проверяю каждую минуту, напишу, когда заработает."
         else
-          send "✗ $(svc "$name") ($name): узел $cur не отвечает, а замены с правилом QUIC нет. Проверяю каждую минуту."
+          send "✗ $(svc "$name") ($name): $(what "$cur") не отвечает, а замены с правилом QUIC нет. Проверяю каждую минуту."
         fi
         [ $DRY = 0 ] && touch "$S/$name.dead.sent"
       fi
@@ -223,7 +240,7 @@ group() {   # group NAME "DOMAINS" (the first domain is measured)
   log "$name: SWITCHED $cur (${ms}ms) -> $best (${bestms}ms)"
   # ChatGPT's nodes die several times a day (seen on a real router: 4 switches a day): a switch that worked
   # is not worth a message; it is in the log and in the weekly digest. Claude's are rare: still reported
-  [ "$name" = gpt ] || send "$(svc "$name") ($name): перешёл на более быстрый узел — $cur (${ms} мс) → $best (${bestms} мс). Делать ничего не нужно."
+  [ "$name" = gpt ] || send "$(svc "$name") ($name): перешёл на более быстрый адрес — $(what "$cur") (${ms} мс) → $(what "$best") (${bestms} мс). Делать ничего не нужно."
 }
 
 nd_load
@@ -244,6 +261,10 @@ fi
 if [ "$1" = --pin ]; then
   domains=""; for g in $GROUPS; do [ "${g%%:*}" = "$2" ] && domains=$(echo "${g#*:}" | tr ',' ' '); done
   [ -n "$domains" ] || { echo "нет группы $2"; exit 1; }
+  if ai_away "$2"; then
+    echo "$2: сейчас путь выбирает резерв для нейросетей ($(cat __STATE__/ai-path/cur.$a)) — узел не меняю. Вернуть DNS-сервис: /ai → «Авто» или sh install.sh ai via dns"
+    exit 1
+  fi
   probe=${domains%% *}; want=$3
   if [ "$want" = best ]; then
     want=""; wm=9999
@@ -265,7 +286,10 @@ if [ "$1" = --pin ]; then
   echo "$2: $(svc "$2") закреплён за $want (${wm} мс)"
   exit 0
 fi
-for g in $GROUPS; do group "${g%%:*}" "$(echo "${g#*:}" | tr ',' ' ')"; done
+for g in $GROUPS; do
+  if ai_away "${g%%:*}"; then log "${g%%:*}: the AI reserve holds it ($(cat __STATE__/ai-path/cur.$a)), skip"; continue; fi
+  group "${g%%:*}" "$(echo "${g#*:}" | tr ',' ' ')"
+done
 exit 0
 EOF
   } | script_subst

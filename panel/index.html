@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:">
+<meta name="referrer" content="no-referrer">
+<title>switchback</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2129; --muted:#667085; --line:#e4e7ec; --green:#12b76a; --yellow:#f5b70a; --red:#f04438; --btn:#2e6ef7; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111418; --card:#1b1f25; --text:#eef0f3; --muted:#98a2b3; --line:#2b313a; --btn:#4f86ff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:18px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:16px; }
+  h1 { font-size:22px; margin:4px 0 14px; display:flex; justify-content:space-between; align-items:center; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:14px; }
+  .row { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); cursor:pointer; }
+  .row:last-child { border-bottom:0; }
+  .dot { width:16px; height:16px; border-radius:50%; flex:none; background:var(--muted); }
+  .green { background:var(--green); } .yellow { background:var(--yellow); } .red { background:var(--red); }
+  .name { flex:1; font-weight:600; overflow-wrap:anywhere; }
+  .how { color:var(--muted); font-size:16px; text-align:right; }
+  .more { display:none; color:var(--muted); font-size:15px; padding:0 0 8px 28px; }
+  .open .more { display:block; }
+  button { font:inherit; border:0; border-radius:12px; padding:12px 16px; background:var(--btn); color:#fff; cursor:pointer; }
+  button.light { background:transparent; color:var(--btn); padding:6px 8px; }
+  button.alt { background:transparent; color:var(--btn); border:1px solid var(--btn); }
+  button:disabled { opacity:.5; cursor:default; }
+  .wide { width:100%; margin-top:10px; }
+  input { font:inherit; width:100%; padding:12px; border-radius:12px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  .muted { color:var(--muted); font-size:16px; }
+  .step { padding:4px 0; }
+  .say { margin-top:10px; font-weight:600; }
+  .err { color:var(--red); }
+  h2 { font-size:18px; margin:0 0 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>switchback <button class="light" id="refresh" type="button">обновить</button></h1>
+  <div id="msg" class="card" hidden></div>
+  <div id="app" hidden>
+    <div class="card" id="services"><div class="muted">Проверяю…</div></div>
+    <div class="card" id="tunnels" hidden>
+      <h2>Туннель</h2>
+      <div id="tunlist"></div>
+      <button class="wide" id="next" type="button" hidden>Переключить на следующий</button>
+      <div id="nextres" class="muted"></div>
+    </div>
+    <div class="card">
+      <h2>Не открывается сайт?</h2>
+      <form id="docform"><input id="site" placeholder="example.com" autocomplete="off" autocapitalize="off" inputmode="url">
+        <button class="wide" type="submit">Проверить</button></form>
+      <div id="doc"></div>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+if (top !== self) { document.body.textContent = ""; throw new Error("framed"); }
+var csrf = "";
+function $(id) { return document.getElementById(id); }
+function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function show(text, isErr) { var m = $("msg"); m.hidden = !text; m.textContent = text || ""; m.className = "card" + (isErr ? " err" : ""); }
+function form(o) { var p = []; for (var k in o) p.push(k + "=" + encodeURIComponent(o[k])); return p.join("&"); }
+function call(action, body, get) {
+  var opt = { credentials: "same-origin", cache: "no-store" };
+  if (!get) { body = body || {}; if (action !== "login") body.csrf = csrf;
+    opt.method = "POST"; opt.headers = { "Content-Type": "application/x-www-form-urlencoded" }; opt.body = form(body); }
+  return fetch("/cgi-bin/sb?a=" + action + (get || ""), opt).then(function (r) { return r.json(); }).then(function (j) {
+    if (j.csrf) csrf = j.csrf;
+    if (j.error) throw new Error(j.error);
+    return j;
+  });
+}
+function steps(box, j) {
+  (j.steps || []).forEach(function (s) {
+    var mark = { ok: "✓ ", bad: "✗ ", warn: "! ", info: "· " }[s.mark] || "";
+    box.appendChild(el("div", "step", mark + s.text));
+  });
+  if (j.say) box.appendChild(el("div", "say", j.say));
+}
+var WAYS = { vpn: "Пустить через туннель", zapret: "Пустить через zapret", dns: "Спросить другой DNS" };
+
+function state(fresh) {
+  $("refresh").disabled = true;
+  return call("state", null, fresh ? "&f=1" : "").then(function (j) {
+    $("app").hidden = false; show("");
+    var s = $("services"); s.textContent = "";
+    (j.services || []).forEach(function (x) {
+      var r = el("div", "row"); r.appendChild(el("span", "dot " + x.color));
+      r.appendChild(el("span", "name", x.name)); r.appendChild(el("span", "how", x.text));
+      var wrap = el("div"); wrap.appendChild(r);
+      wrap.appendChild(el("div", "more", "Как идёт: " + x.how));
+      r.onclick = function () { wrap.classList.toggle("open"); };
+      s.appendChild(wrap);
+    });
+    var t = $("tunlist"); t.textContent = "";
+    var tl = j.tunnels || [];
+    $("tunnels").hidden = tl.length === 0;
+    tl.forEach(function (x) {
+      var r = el("div", "row"); r.appendChild(el("span", "dot " + (x.up ? "green" : (x.active ? "red" : ""))));
+      r.appendChild(el("span", "name", x.name));
+      r.appendChild(el("span", "how", (x.active ? "основной" : "запасной") + (x.up ? " · работает" : x.active ? " · не отвечает" : "")));
+      t.appendChild(r);
+    });
+    $("next").hidden = !j.switch;
+  }).catch(fail).then(function () { $("refresh").disabled = false; });
+}
+function fail(e) {
+  show(e.message === "Failed to fetch" ? "Роутер не отвечает." : e.message, true);
+}
+$("refresh").onclick = function () { state(true); };
+$("next").onclick = function () {
+  var b = $("next"); b.disabled = true; $("nextres").textContent = "Переключаю, это до минуты…";
+  call("next").then(function (j) { var r = $("nextres"); r.textContent = ""; steps(r, j); return state(true); })
+    .catch(function (e) { $("nextres").textContent = e.message; }).then(function () { b.disabled = false; });
+};
+function clean(v) {
+  v = v.trim().toLowerCase().replace(/^[a-z]+:\/\//, "").replace(/[\/?#:].*$/, "").replace(/^www\./, "").replace(/\.$/, "");
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(v) ? v : "";
+}
+$("docform").onsubmit = function (ev) {
+  ev.preventDefault();
+  var d = clean($("site").value), box = $("doc"); box.textContent = "";
+  if (!d) { box.appendChild(el("div", "err", "Нужен адрес сайта, например example.com")); return; }
+  box.appendChild(el("div", "muted", "Проверяю " + d + "… это до минуты"));
+  call("doctor", { d: d }).then(function (j) {
+    box.textContent = ""; steps(box, j);
+    (j.fixes || []).forEach(function (w, i) {
+      var b = el("button", "wide" + (i ? " alt" : ""), (i ? "" : "Исправить: ") + (WAYS[w] || w)); b.type = "button";
+      b.onclick = function () {
+        box.querySelectorAll("button").forEach(function (x) { x.disabled = true; });
+        var res = el("div", "say", "Добавляю…"); box.appendChild(res);
+        call("fix", { d: d, way: w }).then(function (k) { res.textContent = ""; steps(res, k); state(true); })
+          .catch(function (e) { res.textContent = e.message; });
+      };
+      box.appendChild(b);
+    });
+  }).catch(function (e) { box.textContent = ""; box.appendChild(el("div", "err", e.message)); });
+};
+// the link carries the token after "#": sent once, then the session cookie is enough
+var m = /[#&]t=([0-9a-f]{32})/.exec(location.hash);
+if (m) {
+  history.replaceState(null, "", location.pathname);
+  call("login", { t: m[1] }).then(function () { state(false); }).catch(fail);
+} else {
+  state(false).then(function () { if ($("app").hidden) show("Откройте ссылку панели (её показывает установщик: sh install.sh panel link).", true); });
+}
+</script>
+</body>
+</html>

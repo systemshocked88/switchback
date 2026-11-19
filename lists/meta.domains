@@ -1,0 +1,12 @@
+# Meta's domains: the router asks 1.1.1.1 for them (through the tunnel); the provider's DNS gives stubs.
+# One entry per line; "#" starts a comment, blank lines are skipped.
+instagram.com
+cdninstagram.com
+facebook.com
+facebook.net
+fbcdn.net
+fbsbx.com
+threads.com
+threads.net
+whatsapp.com
+whatsapp.net

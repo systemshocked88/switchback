@@ -19,6 +19,10 @@ case "$2" in
   if [ $alive = yes ]; then printf '        connected: yes\n           last-handshake: 42\n'
   else printf '        connected: no\n           last-handshake: 4294967295\n'; fi ;;
 "dns-proxy tls upstream 9.9.9.9 sni bad.example domain claude.ai"|"dns-proxy tls upstream 9.9.9.9 sni bad.example domain openai.com") exit 1 ;;
+# lists tests: a route to 192.0.2.0/24 breaks Telegram (tg-down) until it is removed; 203.0.113.128/25 is refused
+"ip route 192.0.2.0 "*) : > "$SB_OPT/tg-down" ;;
+"no ip route 192.0.2.0 "*) rm -f "$SB_OPT/tg-down" ;;
+"ip route 203.0.113.128 "*) exit 1 ;;
 "show running-config") cat <<'RC'
 ! $$$ Model: Keenetic Test
 interface Wireguard0
@@ -52,7 +56,11 @@ cat > "$T/etc/init.d/S51nfqws2" <<'EOF'
 #!/bin/sh
 echo "S51nfqws2 $*" >> "$SB_OPT/init.log"
 EOF
-printf 'NFQWS_EXTRA_ARGS="$MODE_AUTO"\nUDP_PORTS=443\n' > "$T/etc/nfqws2/nfqws2.conf"
+printf 'NFQWS_EXTRA_ARGS="$MODE_AUTO"
+UDP_PORTS=443
+NFQWS_ARGS_QUIC="--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO>
+                 --payload=quic_initial --lua-desync=fake:blob=quic_initial:repeats=11"
+' > "$T/etc/nfqws2/nfqws2.conf"
 printf 'instagram.com\n' > "$T/etc/nfqws2/lists/user.list"
 printf 'src/gz entware http://bin.entware.net/mipselsf-k3.4\n' > "$T/etc/opkg.conf"
 printf '#!/bin/sh\necho "S10cron $*" >> "$SB_OPT/init.log"\n' > "$T/etc/init.d/S10cron"

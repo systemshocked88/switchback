@@ -1,0 +1,17 @@
+# zapret ways tried by "tune": NAME|STEPS (steps space-separated); in the final mix each step gets
+# :strategy=N. One way per line; "#" starts a comment, blank lines are skipped. The last five came from a
+# test of 468 ways on a computer at home (Zapret GUI, 2026-11-16), where they opened YouTube, its video server
+# and i.ytimg.com; "fake_default_tls" there is tls_clienthello here (nfqws2 on the router has no such blob).
+# multisplit:pos=1,midsld alone was taken out: it failed that test.
+fake-sni-google+multisplit|fake:blob=tls_clienthello:tls_mod=rnd,dupsid,sni=fonts.google.com:tcp_seq=10000 multisplit:pos=1,midsld:seqovl=1:seqovl_pattern=tls_clienthello:tcp_ts_up
+fake-ack+multisplit|fake:blob=0x00000000:tcp_ack=-66000:tls_mod=rnd,dupsid,sni=www.google.com:repeats=2 multisplit:pos=1,midsld
+hostfakesplit|hostfakesplit:host=ozon.ru:midhost=host-2:seqovl=sniext+3:seqovl_pattern=tls_clienthello:badsum:tcp_md5:tcp_ts_up hostfakesplit:tcp_md5:tcp_ts_up
+multidisorder|multidisorder:pos=1,midsld
+fake-md5+multidisorder|fake:blob=tls_clienthello:tls_mod=rnd,dupsid,sni=www.google.com:tcp_md5:repeats=4 multidisorder:pos=1,midsld
+fakedsplit|fakedsplit:pos=midsld:tcp_md5
+fakeddisorder|fakeddisorder:pos=midsld:tcp_md5
+hostfakesplit-ozon-md5|hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_md5:repeats=4
+fake-noack+fakeddisorder|fake:blob=0x00000000:tcp_flags_unset=ack fakeddisorder:pos=midsld:tcp_flags_unset=ack
+multidisorder-seqovl800|multidisorder:pos=1,midsld:seqovl=800:seqovl_pattern=tls_clienthello
+send+fake+fakedsplit-md5|send:repeats=1:tcp_md5 fake:blob=tls_clienthello:tcp_md5:tcp_ack=-10000000:tcp_ts_up fakedsplit:pos=midsld:tcp_md5:tcp_ack=-10000000:tcp_ts_up
+fake-google8+multisplit-seqovl|fake:blob=tls_clienthello:tcp_seq=10000000:repeats=8:tls_mod=rnd,dupsid,sni=www.google.com multisplit:pos=1:seqovl=681:seqovl_pattern=tls_clienthello

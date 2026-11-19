@@ -23,7 +23,7 @@ var answerKeys = map[string]bool{
 	"continue_with_warnings": true, "continue_with_problems": true, "profile": true, "modules": true, "start": true,
 	"zapret_exclude_policy": true, "disable_offload": true, "no_quic": true,
 	"dns_chatgpt": true, "dns_chatgpt_ip": true, "dns_chatgpt_sni": true, "dns_chatgpt_doh": true,
-	"dns_claude": true, "dns_claude_ip": true, "dns_claude_sni": true, "dns_claude_doh": true,
+	"dns_claude": true, "dns_claude_ip": true, "dns_claude_sni": true, "dns_claude_doh": true, "ai_reserve": true,
 	"vpn_iface": true, "meta_vpn": true, "replace_watchdog": true, "replace_backup": true, "bot_token": true, "bot_chat": true, "ntfy_url": true,
 	"uninstall_confirm": true, "uninstall_packages": true, "uninstall_feeds": true,
 	"failover_tunnels": true, "replace_failover": true, "replace_nodes": true, "replace_bot": true,

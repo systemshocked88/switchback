@@ -79,6 +79,8 @@ printf 'profile=full\r\nzapret_exclude_policy=nfqws\r\ndns_claude=y\r\ndns_claud
 check "exit 0"                 equal x "$RC" 0
 check "CRLF answers accepted"  has x "$K/etc/nfqws2/nfqws2.conf" 'POLICY_NAME="nfqws"'
 check "video servers: own ways" has x "$K/etc/nfqws2/nfqws2.conf" 'NFQWS_ARGS_CUSTOM="--filter-tcp=443 --filter-l7=tls --hostlist-domains=googlevideo.com'
+check "QUIC: the working way"  has x "$K/etc/nfqws2/nfqws2.conf" 'NFQWS_ARGS_QUIC="--filter-udp=443 --filter-l7=quic <HOSTLIST_NOAUTO> --payload=quic_initial --lua-desync=fake:blob=quic_initial:ip_autottl=-2,3-20:repeats=10"'
+check "QUIC: no line left"     hasnt x "$K/etc/nfqws2/nfqws2.conf" "                 --payload=quic_initial"
 check "DNS for Claude added"   has x "$K/ndmc.log" "dns-proxy tls upstream 5.6.7.8 sni dns.claude.example domain claude.ai"
 check "ChatGPT not asked -> skipped" hasnt x "$K/ndmc.log" "domain openai.com"
 check "Telegram routes"        has x "$K/ndmc.log" "ip route 149.154.160.0 255.255.240.0 Wireguard0 auto"
@@ -145,12 +147,19 @@ openwrt owdns
 printf 'profile=custom\nmodules=dns\ndns_chatgpt=y\ndns_chatgpt_doh=https://one.example/dns-query\n' > "$R/a"
 sb_o install --answers "$R/a"
 check "first service exit 0"   equal x "$RC" 0
+# the package took over all DNS on install (VM 2026-11-17): only our domains may go to DoH, the rest as before
+check "no takeover: noresolv"  hasnt x "$R/uci.db" "dhcp.@dnsmasq[0].noresolv"
+check "no takeover: servers"   hasnt x "$R/uci.db" "127.0.0.1#5053"
+check "no takeover: backup"    hasnt x "$R/uci.db" "doh_backup_noresolv"
+check "own server kept"        has x "$R/uci.db" "/lan.example/192.168.1.5"
+check "our domain to DoH"      has x "$R/uci.db" "/chatgpt.com/127.0.0.1#5153"
+check "stopped, then started"  equal x "$(grep -E 'https-dns-proxy (stop|start)' "$R/svc.log" | tail -2 | tr '\n' ' ')" "https-dns-proxy stop https-dns-proxy start "
 printf 'profile=custom\nmodules=dns\ndns_chatgpt=y\ndns_chatgpt_doh=https://two.example/dns-query\n' > "$R/a"; : > "$R/svc.log"
 sb_o install --answers "$R/a"
 check "second service exit 0"  equal x "$RC" 0
 check "new address in place"   has x "$R/uci.db" "$(printf 'https-dns-proxy.sb_chatgpt.resolver_url\thttps://two.example/dns-query')"
 check "old address gone"       hasnt x "$R/uci.db" "one.example"
-check "DoH proxy restarted"    has x "$R/svc.log" "https-dns-proxy restart"
+check "DoH proxy restarted"    has x "$R/svc.log" "https-dns-proxy stop"
 check "domains left as they are" has x "$R/out" "chatgpt.com уже настроен"
 
 # ---------- the router's own connections go past zapret (kernel memory leak, real Keenetic 2026-11-11) ----------
@@ -414,6 +423,14 @@ sed -i 's/^SLOW_RUNS=.*/SLOW_RUNS=1/' "$K/etc/switchback/nodes.conf"
 : > "$K/ndmc.log"; nd
 check "slow node replaced"     has x "$K/ndmc.log" "ip host claude.ai 10.0.0.2"
 check "switch logged"          has x "$K/var/claude-nodes/log" "web: SWITCHED 10.0.0.1"
+# the AI reserve holds Claude (lib/ai.sh): the auto-switch leaves its groups alone, /node refuses
+touch "$K/etc/switchback/ai.conf"; mkdir -p "$K/var/ai-path"; echo zdns > "$K/var/ai-path/cur.claude"
+: > "$K/ndmc.log"; nd
+check "ai holds Claude: nodes pin nothing" hasnt x "$K/ndmc.log" "ip host"
+check "ai holds Claude: logged"   has x "$K/var/claude-nodes/log" "the AI reserve holds it (zdns)"
+nd --pin web best
+check "ai holds Claude: /node refuses" has x "$K/nd.out" "путь выбирает резерв для нейросетей"
+rm -rf "$K/etc/switchback/ai.conf" "$K/var/ai-path"
 # the only fast node's rule is switched off -> not used, nothing better -> pause before the next scan
 sed -i 's/^    deny udp 0.0.0.0 0.0.0.0 10.0.0.2 255.255.255.255 port eq 443$/&\n    deny disable/' "$K/rc.extra"
 rm -f "$K/var/claude-nodes/web.bad"; : > "$K/ndmc.log"; nd
@@ -434,8 +451,14 @@ check "no internet: logged"    has x "$K/var/claude-nodes/log" "the internet is 
 check "no internet: no alert"  hasnt x "$K/curl.log" "sendMessage"
 rm -f "$K/net-down" "$K/var/claude-nodes/"*.last_scan; : > "$K/curl.log"; nd
 check "service down: told so"  has x "$K/curl.log" "не отвечает ни через один узел"
+# the pinned address is a spare proxy of the AI reserve (lists/ai-*-proxies.nets): named so, not "узел" (it was read
+# as "GeoHide is back", 19.11.2026)
+PX=$K/etc/switchback/app/lists/ai-claude-proxies.nets; mkdir -p "${PX%/*}"
+[ -f "$PX" ] && cp "$PX" "$PX.keep"; printf '10.0.0.1/32   # Zapret DNS\n' >> "$PX"
 rm -f "$K/node-dead-10.0.0.1"; : > "$K/curl.log"; nd
 check "back: told so"          has x "$K/curl.log" "снова отвечает"
+check "back: a proxy is named" has x "$K/curl.log" "прокси Zapret DNS 10.0.0.1 (не узел DNS-сервиса) снова отвечает"
+if [ -f "$PX.keep" ]; then mv "$PX.keep" "$PX"; else rm -f "$PX"; fi
 : > "$K/curl.log"; nd
 check "back: only once"        hasnt x "$K/curl.log" "снова отвечает"
 rm -f "$K/node-dead-10.0.0.2"
@@ -558,6 +581,103 @@ sb_o uninstall --answers "$R/u"
 check "uninstall exit 0"       equal x "$RC" 0
 check "uci back to original"   equal x "$(sort "$R/uci.db.seed")" "$(sort "$R/uci.db")"
 
+# ---------- OpenWrt in a VM (2026-11-17): uninstall leaves the router as it was before us ----------
+openwrt owclean
+echo ca-certificates > "$R/pkgs.db"            # on the router before us: must stay
+rm -f "$R/etc/crontabs/root"                   # a fresh OpenWrt has no crontab
+sb_o doctor
+check "doctor: legacy iptables note" has x "$R/out" "потянет старый iptables"
+cat > "$R/a" <<EOF
+profile=custom
+modules=zapret dns watchdog
+dns_chatgpt=y
+dns_chatgpt_doh=https://doh.example/dns-query
+ntfy_url=https://ntfy.sh/sb-testchannel1234
+EOF
+sb_o install --answers "$R/a"
+check "exit 0"                 equal x "$RC" 0
+check "deps journaled"         has x "$R/etc/switchback/state" "iptables-zz-legacy"
+check "ours only in deps"      equal x "$(grep '^pkgdeps' "$R/etc/switchback/state" | grep -c ca-certificates)" 0
+check "feed journaled"         has x "$R/etc/switchback/state" "pkgfile $R/etc/opkg/nfqws2-keenetic.conf"
+check "feed key journaled"     has x "$R/etc/switchback/state" "pkgfile $R/etc/opkg/keys/96e4a10c3f9d405d"
+check "new crontab journaled"  has x "$R/etc/switchback/state" "cronfile"
+check "orig conf made"         exists x "$R/etc/nfqws2/nfqws2.conf.orig"
+sb_o doctor
+check "doctor: no note after"  hasnt x "$R/out" "потянет старый iptables"
+mkdir -p "$R/etc/config"; echo "config main" > "$R/etc/config/https-dns-proxy"   # the real package has one
+date +%s > "$R/etc/switchback/tune.running"
+printf 'uninstall_confirm=y\nuninstall_packages=y\n' > "$R/u"
+sb_o uninstall --answers "$R/u"
+check "uninstall exit 0"       equal x "$RC" 0
+check "only what was before"   equal x "$(cat "$R/pkgs.db")" "ca-certificates"
+check "feed removed"           missing x "$R/etc/opkg/nfqws2-keenetic.conf"
+check "feed key removed"       missing x "$R/etc/opkg/keys/96e4a10c3f9d405d"
+check "zapret conf removed"    missing x "$R/etc/nfqws2"
+check "DoH conf removed"       missing x "$R/etc/config/https-dns-proxy"
+check "our crontab removed"    missing x "$R/etc/crontabs/root"
+check "tune mark removed"      missing x "$R/etc/switchback/tune.running"
+check "nothing failed"         hasnt x "$R/out" "не удалось удалить пакеты"
+
+# nfqws2 appears a few seconds after the restart (25.12 in the VM, 2026-11-17): wait for it, do not roll back
+openwrt owslow
+printf '#!/bin/sh\nn=$(cat "$SB_ROOT/pidof-n" 2>/dev/null || echo 0); echo $((n+1)) > "$SB_ROOT/pidof-n"\n[ "$n" -ge 2 ] && [ "$1" = nfqws2 ] && grep -qx nfqws2-keenetic "$SB_ROOT/pkgs.db"\n' > "$R/bin/pidof"
+printf 'profile=zapret\n' > "$R/a"
+export SB_ZAPRET_WAIT=3
+sb_o install --answers "$R/a"
+check "slow start: exit 0"     equal x "$RC" 0
+check "slow start: no rollback" hasnt x "$R/out" "не запустился"
+check "slow start: asked again" "$SH" -c "[ $(cat "$R/pidof-n") -ge 3 ]"
+# never appears: given up after SB_ZAPRET_WAIT seconds, rolled back as before
+openwrt owdead
+printf '#!/bin/sh\nexit 1\n' > "$R/bin/pidof"
+export SB_ZAPRET_WAIT=0
+printf 'profile=zapret\n' > "$R/a"
+sb_o install --answers "$R/a"
+check "dead: fails"            equal x "$RC" 1
+check "dead: says so"          has x "$R/out" "zapret не запустился после настройки"
+unset SB_ZAPRET_WAIT
+
+# packages kept on uninstall: their source stays too; zapret settings back, the copy gone
+openwrt owkeep
+printf 'profile=zapret\n' > "$R/a"
+sb_o install --answers "$R/a"
+printf 'uninstall_confirm=y\nuninstall_packages=n\n' > "$R/u"
+sb_o uninstall --answers "$R/u"
+check "keep: exit 0"           equal x "$RC" 0
+check "keep: zapret stays"     has x "$R/pkgs.db" "nfqws2-keenetic"
+check "keep: feed stays"       exists x "$R/etc/opkg/nfqws2-keenetic.conf"
+check "keep: settings back"    has x "$R/etc/nfqws2/nfqws2.conf" 'NFQWS_EXTRA_ARGS="$MODE_AUTO"'
+check "keep: orig gone"        missing x "$R/etc/nfqws2/nfqws2.conf.orig"
+check "keep: crontab kept"     exists x "$R/etc/crontabs/root"
+
+# no bot token, no ntfy: the watchdog is skipped before the scheduler is touched
+openwrt ownotoken
+printf 'profile=custom\nmodules=watchdog\n' > "$R/a"
+sb_o install --answers "$R/a"
+check "exit 0"                 equal x "$RC" 0
+check "explains the skip"      has x "$R/out" "нет ни токена бота"
+check "no cron lines"          hasnt x "$R/etc/crontabs/root" "switchback"
+check "no curl journaled"      hasnt x "$R/etc/switchback/state" "pkg curl"
+
+# a module with nothing to do is "skipped" in the summary, not "already set up"
+openwrt owskip
+printf 'profile=custom\nmodules=nodes\n' > "$R/a"
+sb_o install --answers "$R/a"
+check "exit 0"                 equal x "$RC" 0
+check "summary: skipped"       has x "$R/out" "пропущено, см. выше"
+check "not 'already set up'"   hasnt x "$R/out" "уже было настроено"
+
+# ntfy channel name without od (BusyBox on OpenWrt has none), and without hexdump either
+openwrt owntfy
+mkdir -p "$R/nood"; printf '#!/bin/sh\nexit 127\n' > "$R/nood/od"; cp "$R/nood/od" "$R/nood/hexdump"; chmod +x "$R/nood/"*
+n1=$(PATH="$R/nood:$PATH" "$SH" -c ". '$SRC/lib/common.sh'; . '$SRC/lib/modules.sh'; ntfy_new")
+check "no od/hexdump: long name" equal x "${#n1}" 43
+check "no od/hexdump: valid"   "$SH" -c ". '$SRC/lib/common.sh'; . '$SRC/lib/modules.sh'; ntfy_valid '$n1'"
+rm "$R/nood/hexdump"
+n2=$(PATH="$R/nood:$PATH" "$SH" -c ". '$SRC/lib/common.sh'; . '$SRC/lib/modules.sh'; ntfy_new")
+check "no od: long name"       equal x "${#n2}" 43
+check "two names differ"       "$SH" -c "[ '$n1' != '$n2' ]"
+
 # ---------- OpenWrt firmware upgrade: our files kept, lost packages found and reinstalled ----------
 openwrt upgrade
 printf '/etc/my-own-file\n' > "$R/etc/sysupgrade.conf"
@@ -586,7 +706,7 @@ sb_o install --answers "$R/a"
 check "reinstall exit 0"       equal x "$RC" 0
 check "zapret back"            has x "$R/pkgs.db" "nfqws2-keenetic"
 check "DoH proxy back"         has x "$R/pkgs.db" "https-dns-proxy"
-check "DoH proxy restarted"    has x "$R/svc.log" "https-dns-proxy restart"
+check "DoH proxy restarted"    has x "$R/svc.log" "https-dns-proxy stop"
 check "no duplicate journal"   equal x "$(sort "$R/etc/switchback/state" | uniq -d)" ""
 check "no duplicate keep lines" equal x "$(sort "$R/etc/sysupgrade.conf" | uniq -d)" ""
 printf 'uninstall_confirm=y\nuninstall_packages=y\n' > "$R/u"
@@ -721,6 +841,7 @@ sb_k install --answers "$K/a"
 check "install exit 0"         equal x "$RC" 0
 check "copy on the router"     equal x "$(cat "$K/etc/switchback/app/VERSION")" "$(sed -n 's/^VERSION=//p' "$SRC/install.sh")"
 check "copy is complete"       exists x "$K/etc/switchback/app/lib/sites.sh"
+check "copy has the lists"     equal x "$(ls "$K/etc/switchback/app/lists" | wc -l | tr -d ' ')" "$(ls "$SRC/lists" | wc -l | tr -d ' ')"
 check "bot job installed"      exists x "$K/etc/cron.1min/sb-bot"
 check "bot paths filled in"    hasnt x "$K/etc/cron.1min/sb-bot" "__"
 check "bot: no background copy" hasnt x "$K/etc/cron.1min/sb-bot" "--run"
@@ -801,8 +922,11 @@ rm -f "$K/site-cut-cut.example"
 sb_k sites add 'x.org;reboot' --via zapret
 check "odd input refused"      equal x "$RC" 1
 check "nothing added"          hasnt x "$K/etc/nfqws2/lists/user.list" "reboot"
-sb_k sites add api.anthropic.com --via vpn
+sb_k sites add api.anthropic.com --via zapret
 check "built-in not added"     has x "$K/out" "встроен в switchback"
+sb_k sites add api.anthropic.com --via vpn       # an AI service through VPN: the reserve's switch is offered
+check "AI site via VPN: offer" has x "$K/out" "Claude через VPN"
+check "AI site via VPN: not added" hasnt x "$K/etc/switchback/sites" "api.anthropic.com"
 printf '10.1.1.1\n10.1.1.2\n' > "$K/dns-blocked.example"; : > "$K/ndmc.log"
 sb_k sites add blocked.example --via vpn
 check "vpn site: route 1"      has x "$K/ndmc.log" "ip route 10.1.1.1 255.255.255.255 Wireguard0 auto"
@@ -838,7 +962,7 @@ ipv4     2 tcp      6 50 SYN_SENT src=192.168.1.9 dst=198.51.100.12 sport=40009 
 EOF
 # "Google's ranges" in this test: 203.0.113.0/24; 198.51.100.11 is stuck, answers by address, is not Google;
 # 203.0.113.12 and 198.51.100.12 are silent directly once only (zapret switched its way): left alone
-export SB_VIDEO_NETS="203.0.113.0/24" SB_VIDEO_PAUSE=0 SB_VIDEO_TRY=20
+export SB_VIDEO_NETS="203.0.113.0/24" SB_VIDEO_PAUSE=0 SB_VIDEO_TRY=20 SB_WAN_DEV=ppp0
 : > "$K/video-flaky-203.0.113.12"; : > "$K/ip-flaky-198.51.100.12"
 : > "$K/video-dead-203.0.113.5"; : > "$K/video-dead-203.0.113.8"; : > "$K/video-novpn-203.0.113.8"
 # any site: 198.51.100.9 is cut off by its address (answers through the tunnel), 198.51.100.10 is down for everyone
@@ -914,7 +1038,7 @@ check "prune: answering one stays"  has x "$K/etc/switchback/sites.routes" "198.
 rm -f "$K/video-novpn-203.0.113.5"
 # a route for the name only (.13) goes after 6 hours, to be checked anew; a route by address (.9) stays.
 # Routes made before 0.7.5 have no line in video.kind: a Google one counts as "name" from now, any other as "addr"
-printf '203.0.113.20 video\n198.51.100.20 video\n' >> "$K/etc/switchback/sites.routes"
+printf '203.0.113.20 video\n198.51.100.20 video\n' >> "$K/etc/switchback/sites.routes"; : > "$K/ip-dead-198.51.100.20"
 : > "$K/ndmc.log"; sb_k sites refresh video
 check "old route: Google counts as name"   grep -q "^203.0.113.20 [0-9]* name$" "$K/etc/switchback/video.kind"
 check "old route: other counts as address" grep -q "^198.51.100.20 [0-9]* addr$" "$K/etc/switchback/video.kind"
@@ -932,16 +1056,33 @@ check "old other route: stays"        has x "$K/etc/switchback/sites.routes" "19
 # 10 minutes later the cut-off one is checked again and comes back in the usual way
 vs_age; : > "$K/ndmc.log"; sb_k sites refresh video
 check "name route: back if cut off"   has x "$K/ndmc.log" "ip route 203.0.113.13 255.255.255.255 Wireguard0 auto"
+# a server cut off by its address answers directly again (seen 2026-11-18): it is asked past its route (bound to
+# the way to the internet), marked the first hour, its route goes the next one; a route for the name is not asked so
+rm -f "$K/ip-dead-198.51.100.9"
+vs_age; : > "$K/ndmc.log"; : > "$K/curl.log"; sb_k sites refresh video
+check "direct again: asked past the route" has x "$K/curl.log" "--interface ppp0 -w %{time_appconnect} https://198.51.100.9/"
+check "direct again: through zapret"       has x "$K/curl.log" "--local-port 61000-61099 --interface ppp0"
+check "direct again: once is not enough"   hasnt x "$K/ndmc.log" "no ip route 198.51.100.9"
+check "direct again: marked"               grep -q "^198.51.100.9 [0-9]* direct$" "$K/etc/switchback/video.seen"
+check "direct again: name route not asked" equal x "$(grep -c 'ppp0.*203[.]0[.]113' "$K/curl.log")" 0
+vs_age; : > "$K/ndmc.log"; sb_k sites refresh video
+check "direct again: route removed"     has x "$K/ndmc.log" "no ip route 198.51.100.9 255.255.255.255 Wireguard0"
+check "direct again: out of the routes" hasnt x "$K/etc/switchback/sites.routes" "198.51.100.9 "
+check "direct again: kind gone"         hasnt x "$K/etc/switchback/video.kind" "198.51.100.9 "
+check "direct again: seen ok"           grep -q "^198.51.100.9 [0-9]* ok$" "$K/etc/switchback/video.seen"
+check "direct again: logged"            has x "$K/var/log/switchback.log" "server 198.51.100.9: answers directly again"
+check "direct again: not routed back"   hasnt x "$K/ndmc.log" "ip route 198.51.100.9 255.255.255.255 Wireguard0 auto"
+check "direct again: silent one stays"  has x "$K/etc/switchback/sites.routes" "198.51.100.20 video"
 # while "tune" tries settings (and 15 minutes after its start) nothing is checked
 date +%s > "$K/etc/switchback/tune.running"; rm -f "$K/etc/switchback/video.seen"; : > "$K/curl.log"
 sb_k sites refresh video
 check "video: waits for tune"   hasnt x "$K/curl.log" "203.0.113"
 rm -f "$K/etc/switchback/tune.running"
 : > "$K/ndmc.log"; sb_k sites video off
-check "video: routes removed"   has x "$K/ndmc.log" "no ip route 198.51.100.9 255.255.255.255 Wireguard0"
+check "video: routes removed"   has x "$K/ndmc.log" "no ip route 198.51.100.20 255.255.255.255 Wireguard0"
 check "video: out of the list"  hasnt x "$K/etc/switchback/sites" "rescue video"
 check "video: out of journal"   hasnt x "$K/etc/switchback/state" "site rescue video"
-unset SB_CONNTRACK SB_VIDEO_NETS SB_VIDEO_PAUSE SB_VIDEO_TRY
+unset SB_CONNTRACK SB_VIDEO_NETS SB_VIDEO_PAUSE SB_VIDEO_TRY SB_WAN_DEV
 # a chosen device reaches Google/YouTube through the tunnel (a fake "ip" only: SB_IPCMD)
 cat > "$K/ipfake" <<'EOF'
 #!/bin/sh
@@ -1041,6 +1182,21 @@ botmsg "/site del viabot2.example" "$NO" "$TUN"
 check "bot: «Нет» cancels"     has x "$K/curl.log" "Отменено"
 check "bot: site kept"         has x "$K/etc/switchback/sites" "vpn viabot2.example"
 check "bot: «Туннели» button"  has x "$K/curl.log" "Wireguard0: подключено"
+# /ai (lib/ai.sh, off here): the menu word «Claude» and «клод» (escapes) lead to it, with the switch's buttons;
+# asking for claude.ai «through VPN» as an own site ends with the same button, not a dead end
+KLOD="${B}u041a${B}u043b${B}u043e${B}u0434"
+botmsg "Claude" "$KLOD"
+: > "$K/curl.log"; SB_OPT=$K SB_BOT_ONCE=1 SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$K/etc/cron.1min/sb-bot" > /dev/null 2>&1
+check "bot: «Claude» -> /ai"   equal x "$(grep -c 'command /ai' "$K/var/sb-bot/log")" 2
+check "bot: /ai buttons"       has x "$K/curl.log" '"callback_data":"ai vpn"'
+botmsg "/site add claude.ai vpn"
+: > "$K/curl.log"; SB_OPT=$K SB_BOT_ONCE=1 SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$K/etc/cron.1min/sb-bot" > /dev/null 2>&1
+botmsg "/yes"
+: > "$K/curl.log"; SB_OPT=$K SB_BOT_ONCE=1 SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$K/etc/cron.1min/sb-bot" > /dev/null 2>&1
+check "bot: AI site via VPN -> the switch" has x "$K/curl.log" '"callback_data":"ai vpn"'
+check "bot: no router command for a person" hasnt x "$K/curl.log" "sh+install.sh"
+check "bot: no router command (plain)" hasnt x "$K/curl.log" "sh install.sh"
+check "bot: AI site not added" hasnt x "$K/etc/switchback/sites" "claude.ai"
 # /check: own sites are checked, the line of the cut-off servers job ("rescue video") is not a site
 grep -qx 'rescue video' "$K/etc/switchback/sites" || echo 'rescue video' >> "$K/etc/switchback/sites"
 botmsg "/check"
@@ -1054,6 +1210,7 @@ DIAG="${B}u0427${B}u0442${B}u043e-${B}u0442${B}u043e ${B}u043d${B}u0435 ${B}u044
 botmsg "$DIAG"; bot1
 check "diag: menu word"        has x "$K/var/sb-bot/log" "command /diag"
 check "diag: all fine"         has x "$K/curl.log" "Со стороны роутера всё в порядке"
+check "diag: phone video button" has x "$K/curl.log" '"callback_data":"quic"'
 touch "$K/site-dead-www.youtube.com"; botmsg "/diag"; bot1
 check "diag: YouTube down"     has x "$K/curl.log" "YouTube не открывается, хотя zapret работает"
 check "diag: tune button"      has x "$K/curl.log" '"callback_data":"tune"'
@@ -1063,6 +1220,7 @@ rm -f "$K/net-down"
 # an address sent as it is: checked; not opening -> buttons to add it
 botmsg "https:${B}/${B}/Example.COM${B}/page?x=1"; bot1
 check "diag: link understood"  has x "$K/curl.log" "example.com открывается с роутера"
+printf '10.9.9.1\n' > "$K/dns-blocked.example"; printf '10.9.9.2\n' > "$K/dns-cut.example"
 touch "$K/site-dead-blocked.example"; botmsg "blocked.example"; bot1
 check "diag: offers zapret"    has x "$K/curl.log" '"callback_data":"site add blocked.example zapret"'
 rm -f "$K/site-dead-blocked.example"
@@ -1085,6 +1243,16 @@ botmsg "/tune" "yes"; bot1
 check "tune: asks first"       has x "$K/curl.log" "Подобрать настройки zapret?"
 check "tune: started"          has x "$K/curl.log" "Начинаю подбор"
 check "tune: undo button"      has x "$K/curl.log" '"callback_data":"tune undo"'
+# «Видео на телефоне тормозит» (/quic): what servers sent and a button for another way; it asks, then switches
+botmsg "/quic"; bot1
+check "quic: status shown"     has x "$K/curl.log" "способ для QUIC"
+check "quic: next button"      has x "$K/curl.log" '"callback_data":"quic next"'
+botmsg "/quic next" "yes"; bot1
+check "quic: asks first"       has x "$K/curl.log" "Включить другой способ для QUIC"
+check "quic: switched"         has x "$K/etc/nfqws2/nfqws2.conf" "fake:blob=fake_default_quic:repeats=12"
+check "quic: undo button"      has x "$K/curl.log" '"callback_data":"quic undo"'
+botmsg "/quic undo" "yes"; bot1
+check "quic: undone"           has x "$K/etc/nfqws2/nfqws2.conf" "quic_initial:ip_autottl=-2,3-20:repeats=10"
 # servers sent as files: kept until «Проверить и добавить», then checked on their own, the files wiped
 botdoc() { printf '{"ok":true,"result":[{"update_id":301,"message":{"chat":{"id":-100},"document":{"file_name":"%s","mime_type":"x","thumbnail":{"file_id":"THUMB","file_unique_id":"T1","width":90},"file_id":"F1","file_unique_id":"U1","file_size":300}}}]}\n' "$1" > "$K/updates"; }
 printf '[Interface]\nPrivateKey = %s\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = SERVERpubKEYforTESTSonly0123456789abcdefgh=\nEndpoint = 203.0.113.51:51820\n' "$PRIV" > "$K/tg-file"
@@ -1113,19 +1281,120 @@ SB_DEVNULL=$K/fake-null "$SH" -c "sed '/^check /d' '$K/etc/cron.5mins/watchdog' 
 check "broken /dev/null reported" has x "$K/curl.log" "системный файл /dev/null"
 echo "# old text" >> "$K/etc/cron.5mins/watchdog"; echo old > "$K/etc/switchback/app/VERSION"
 cp "$K/etc/switchback/sites" "$K/sites.before"
+# a copy from before 0.7.5 has app/lists without VERSION (seen 2026-11-18): no "can't open" on the screen
+rm -f "$K/etc/switchback/app/lists/VERSION"
 sb_k update --progress
 check "update exit 0"          equal x "$RC" 0
+check "update: no lists VERSION, quiet" hasnt x "$K/out" "lists/VERSION"
 check "update event"           has x "$K/out" "@@sb	updated	old	"
 check "watchdog rewritten"     hasnt x "$K/etc/cron.5mins/watchdog" "# old text"
 check "sites kept"             equal x "$(cat "$K/sites.before")" "$(cat "$K/etc/switchback/sites")"
 check "doctor shows version"   has x "$(sb_k doctor --progress; echo "$K/out")" "@@sb	installed	"
+# lists apply: the program put newer lists into the copy and runs the copy; only additions, own routes kept
+A=$K/etc/switchback/app
+echo 7 > "$A/lists/VERSION"
+echo "203.0.113.0/255.255.255.0" >> "$A/lists/telegram.nets"
+echo "lists-new.example" >> "$A/lists/zapret.domains"
+: > "$K/ndmc.log"
+sb_a() { SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$A/install.sh" "$@" > "$K/out" 2>&1; RC=$?; }
+sb_a lists apply --progress
+check "lists apply exit 0"      equal x "$RC" 0
+check "lists apply event"       has x "$K/out" "@@sb	lists_applied	7"
+check "lists: new Telegram net" has x "$K/ndmc.log" "ip route 203.0.113.0 255.255.255.0 Wireguard0 auto"
+check "lists: old net not again" hasnt x "$K/ndmc.log" "ip route 91.108.56.0 255.255.252.0"
+check "lists: new zapret domain" has x "$K/etc/nfqws2/lists/user.list" "lists-new.example"
+check "lists: kept for uninstall" has x "$K/etc/switchback/state" "list lists-new.example"
+check "lists: sites kept"       equal x "$(cat "$K/sites.before")" "$(cat "$K/etc/switchback/sites")"
+sb_a lists --progress
+check "lists status: version"   has x "$K/out" "@@sb	lists	7	0"
+sb_a lists bogus
+check "lists: unknown -> 2"     equal x "$RC" 2
+# a newer version of switchback keeps lists downloaded later than its own (a higher lists/VERSION)
+sb_k update
+check "update keeps newer lists" has x "$A/lists/zapret.domains" "lists-new.example"
+# lists put: the program sends the lists as tar.gz on stdin; the old ones go to lists.prev, then apply
+L=$K/lists-in; rm -rf "$L"; mkdir -p "$L"; cp "$A"/lists/* "$L/"; echo 8 > "$L/VERSION"
+echo "198.51.100.0/255.255.255.0" >> "$L/telegram.nets"
+(cd "$L" && tar czf "$K/lists.tgz" *)
+: > "$K/ndmc.log"
+sb_k lists put --progress < "$K/lists.tgz"
+check "lists put exit 0"        equal x "$RC" 0
+check "lists put: applied 8"    has x "$K/out" "@@sb	lists_applied	8"
+check "lists put: in the copy"  has x "$A/lists/telegram.nets" "198.51.100.0"
+check "lists put: old kept"     has x "$K/etc/switchback/lists.prev/VERSION" "7"
+check "lists put: routed"       has x "$K/ndmc.log" "ip route 198.51.100.0 255.255.255.0 Wireguard0 auto"
+check "lists put: no temp left" missing x "$K/etc/switchback/lists.new"
+sb_k lists put < "$K/lists.tgz"
+check "same version refused"    equal x "$RC" 1
+check "refused: copy unchanged" has x "$A/lists/VERSION" "8"
+echo 9 > "$L/VERSION"; echo "rm -rf /" > "$L/evil.sh"; (cd "$L" && tar czf "$K/lists.tgz" *)
+sb_k lists put < "$K/lists.tgz"
+check "extra file refused"      equal x "$RC" 1
+check "extra: nothing put"      missing x "$A/lists/evil.sh"
+rm -f "$L/evil.sh"
+# what left the lists comes off the router, but only what switchback put there itself
+lput() { echo "$1" > "$L/VERSION"; (cd "$L" && tar czf "$K/lists.tgz" *); : > "$K/ndmc.log"; : > "$K/curl.log"; sb_k lists put --progress < "$K/lists.tgz"; }
+echo "hand.example" >> "$K/etc/nfqws2/lists/user.list"; echo "hand.example" >> "$L/zapret.domains"
+lput 10
+check "lists 10 applied"        equal x "$RC" 0
+check "hand domain not ours"    hasnt x "$K/etc/switchback/state" "list hand.example"
+check "bot told: updated"       has x "$K/curl.log" "Списки обновлены до версии 10"
+grep -v "^203.0.113.0/" "$L/telegram.nets" > "$L/t" && mv "$L/t" "$L/telegram.nets"
+grep -v "^lists-new.example\$\|^hand.example\$" "$L/zapret.domains" > "$L/t" && mv "$L/t" "$L/zapret.domains"
+lput 11
+check "lists 11 applied"        equal x "$RC" 0
+check "gone net: route removed" has x "$K/ndmc.log" "no ip route 203.0.113.0 255.255.255.0 Wireguard0"
+check "gone net: forgotten"     hasnt x "$K/etc/switchback/state" "route 203.0.113.0 "
+check "gone domain removed"     hasnt x "$K/etc/nfqws2/lists/user.list" "lists-new.example"
+check "gone domain: forgotten"  hasnt x "$K/etc/switchback/state" "list lists-new.example"
+check "hand domain kept"        has x "$K/etc/nfqws2/lists/user.list" "hand.example"
+check "hand route kept"         hasnt x "$K/ndmc.log" "no ip route 91.108.56.0"
+check "kept nets stay"          hasnt x "$K/ndmc.log" "no ip route 198.51.100.0"
+check "bot told: removed"       has x "$K/curl.log" "убрано: 2"
+# lists restore: the previous lists back, what they had comes back on the router
+: > "$K/ndmc.log"; : > "$K/curl.log"
+sb_k lists restore --progress
+check "restore exit 0"          equal x "$RC" 0
+check "restore event"           has x "$K/out" "@@sb	lists_restored	10"
+check "restore: copy is 10"     has x "$A/lists/VERSION" "10"
+check "restore: 11 kept as prev" has x "$K/etc/switchback/lists.prev/VERSION" "11"
+check "restore: domain back"    has x "$K/etc/nfqws2/lists/user.list" "lists-new.example"
+check "restore: route back"     has x "$K/ndmc.log" "ip route 203.0.113.0 255.255.255.0 Wireguard0 auto"
+check "restore: bot told"       has x "$K/curl.log" "Вернул прежние списки (версия 10"
+sb_k lists --progress
+check "status: prev version"    has x "$K/out" "@@sb	lists	10	11"
+# automatic rollback: a new route breaks Telegram -> the previous lists come back by themselves
+cp "$A"/lists/* "$L/"; echo "192.0.2.0/255.255.255.0" >> "$L/telegram.nets"
+lput 12
+check "worse: refused (1)"      equal x "$RC" 1
+check "worse: rollback event"   has x "$K/out" "@@sb	lists_rollback	10"
+check "worse: copy back to 10"  has x "$A/lists/VERSION" "10"
+check "worse: bad route removed" has x "$K/ndmc.log" "no ip route 192.0.2.0 255.255.255.0 Wireguard0"
+check "worse: Telegram back"    missing x "$K/tg-down"
+check "worse: not in journal"   hasnt x "$K/etc/switchback/state" "route 192.0.2.0 "
+check "worse: told (ntfy/bot)"  has x "$K/curl.log" "сам вернул прежние"
+# automatic rollback: the router refuses a route in the middle of "lists apply"
+cp "$A"/lists/* "$L/"; echo "203.0.113.128/255.255.255.128" >> "$L/telegram.nets"; echo "mid.example" >> "$L/zapret.domains"
+lput 13
+check "broken: refused (1)"     equal x "$RC" 1
+check "broken: rollback event"  has x "$K/out" "@@sb	lists_rollback	10"
+check "broken: copy back to 10" has x "$A/lists/VERSION" "10"
+check "broken: nothing left"    hasnt x "$K/etc/nfqws2/lists/user.list" "mid.example"
+check "broken: told"            has x "$K/curl.log" "применение прервалось"
+rm -rf "$K/etc/switchback/lists.prev"
+sb_k lists restore
+check "restore without prev: 1" equal x "$RC" 1
 # tuning: the fast way goes first under circular; nothing better -> nothing changes; undo
 printf 'NFQWS_ARGS="--filter-tcp=443\n            --lua-desync=multisplit:pos=1\n            --payload=http_req"\nNFQWS_EXTRA_ARGS="$MODE_LIST"\n' > "$K/etc/nfqws2/nfqws2.conf"
 printf 'youtube.com\ngooglevideo.com\ndiscord.com\n' >> "$K/etc/nfqws2/lists/user.list"
-echo "fakeddisorder:pos=midsld" > "$K/tune-best"
+echo "fakeddisorder:pos=midsld:tcp_md5" > "$K/tune-best"
 sb_k tune --progress
 check "tune exit 0"            equal x "$RC" 0
-check "all ways tried"         equal x "$(ev_count "$K/out" tune_try)" 8
+check "tune: busy mark gone"   missing x "$K/etc/switchback/tune.running"
+check "all ways tried"         equal x "$(ev_count "$K/out" tune_try)" 12
+check "new ways tried"         has x "$K/out" "fake-google8+multisplit-seqovl"
+check "new ways: noack too"    has x "$K/out" "fake-noack+fakeddisorder"
+check "lone multisplit gone"   equal x "$(grep -cE 'tune_try.[0-9]+.[0-9]+.multisplit$' "$K/out")" 0
 check "fast way first"         has x "$K/etc/nfqws2/nfqws2.conf" "--lua-desync=circular:fails=2:time=300:retrans=3:nld=2 --lua-desync=fakeddisorder:pos=midsld:tcp_md5:strategy=1"
 check "Google way always last" has x "$K/etc/nfqws2/nfqws2.conf" "--lua-desync=hostfakesplit:host=www.google.com:tcp_ts=-600000:strategy=4 --payload=http_req"
 check "one NFQWS_ARGS line"    equal x "$(grep -c '^ ' "$K/etc/nfqws2/nfqws2.conf")" 0
@@ -1133,17 +1402,32 @@ check "other settings kept"    has x "$K/etc/nfqws2/nfqws2.conf" 'NFQWS_EXTRA_AR
 cp "$K/etc/nfqws2/nfqws2.conf" "$K/tuned"
 sb_k tune
 check "nothing better: kept"   equal x "$(cat "$K/tuned")" "$(cat "$K/etc/nfqws2/nfqws2.conf")"
+check "kept: busy mark gone"   missing x "$K/etc/switchback/tune.running"
 sb_k tune --undo
 check "undo: as before"        has x "$K/etc/nfqws2/nfqws2.conf" "--lua-desync=multisplit:pos=1"
 # ways of their own for YouTube video servers: on, again, off; settings written by hand are left alone
 sb_k tune video on --progress
 check "video ways: on"          has x "$K/out" "@@sb	tune_video	on	done"
 check "video ways: profile"     has x "$K/etc/nfqws2/nfqws2.conf" "--hostlist-domains=googlevideo.com --out-range=-d8 --payload=tls_client_hello --lua-desync=circular"
-check "video ways: all five"    has x "$K/etc/nfqws2/nfqws2.conf" "tcp_seq=2:strategy=5"
+check "video ways: all seven"   has x "$K/etc/nfqws2/nfqws2.conf" "seqovl_pattern=tls_clienthello:strategy=7"
+check "video ways: two steps"   has x "$K/etc/nfqws2/nfqws2.conf" "fake:blob=0x00000000:tcp_flags_unset=ack:strategy=6 --lua-desync=fakeddisorder:pos=midsld:tcp_flags_unset=ack:strategy=6"
+check "video ways: per server"  has x "$K/etc/nfqws2/nfqws2.conf" "--payload=tls_client_hello --lua-desync=circular:fails=2:time=300:retrans=3 --lua-desync="
+check "video ways: no nld"      equal x "$(grep '^NFQWS_ARGS_CUSTOM=' "$K/etc/nfqws2/nfqws2.conf" | grep -c nld)" 0
 check "video ways: no hostfake" hasnt x "$K/etc/nfqws2/nfqws2.conf" "hostfakesplit:host=www.google.com:tcp_ts=-600000:strategy="
 check "video ways: main kept"   has x "$K/etc/nfqws2/nfqws2.conf" "--lua-desync=multisplit:pos=1"
 sb_k tune video on --progress
 check "video ways: not twice"   has x "$K/out" "@@sb	tune_video	on	exists"
+# a profile of an earlier version (one circle by site, nld=2): "on" puts this one in, "off" takes it away
+vold='NFQWS_ARGS_CUSTOM="--filter-tcp=443 --filter-l7=tls --hostlist-domains=googlevideo.com --out-range=-d8 --payload=tls_client_hello --lua-desync=circular:fails=2:time=300:retrans=3:nld=2 --lua-desync=multisplit:pos=2:strategy=1"'
+sed -i "s|^NFQWS_ARGS_CUSTOM=.*|$vold|" "$K/etc/nfqws2/nfqws2.conf"
+sb_k tune video on --progress
+check "video ways: old updated" has x "$K/out" "@@sb	tune_video	on	done"
+check "video ways: old said"    has x "$K/out" "обновлено: 7 способов"
+check "video ways: old gone"    equal x "$(grep '^NFQWS_ARGS_CUSTOM=' "$K/etc/nfqws2/nfqws2.conf" | grep -c nld)" 0
+sed -i "s|^NFQWS_ARGS_CUSTOM=.*|$vold|" "$K/etc/nfqws2/nfqws2.conf"
+sb_k tune video off --progress
+check "video ways: old off"     has x "$K/etc/nfqws2/nfqws2.conf" 'NFQWS_ARGS_CUSTOM=""'
+sb_k tune video on --progress
 sb_k tune video off --progress
 check "video ways: off"         has x "$K/etc/nfqws2/nfqws2.conf" 'NFQWS_ARGS_CUSTOM=""'
 sed -i 's|^NFQWS_ARGS_CUSTOM=.*|NFQWS_ARGS_CUSTOM="--filter-tcp=80 --lua-desync=fake"|' "$K/etc/nfqws2/nfqws2.conf"
@@ -1152,6 +1436,50 @@ check "video ways: hand-made stays" has x "$K/etc/nfqws2/nfqws2.conf" 'NFQWS_ARG
 check "video ways: refused"     equal x "$RC" 1
 sb_k tune video sideways
 check "video ways: bad action"  equal x "$RC" 2
+# QUIC: the package's way gives way to the working one on an update (once); next goes round the list, undo back to
+# what was before the first next; status counts what servers sent over UDP 443; a way written by hand stays
+NQ=$K/etc/nfqws2/nfqws2.conf
+sed -i '/^NFQWS_ARGS_QUIC=/d' "$NQ"
+printf 'NFQWS_ARGS_QUIC="--filter-udp=443 --filter-l7=quic\n   --payload=quic_initial --lua-desync=fake:blob=quic_initial:repeats=11"\n' >> "$NQ"
+sb_k update
+check "quic update: replaced"   has x "$NQ" 'NFQWS_ARGS_QUIC="--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=quic_initial:ip_autottl=-2,3-20:repeats=10"'
+check "quic update: one line"   hasnt x "$NQ" "   --payload=quic_initial"
+check "quic update: logged"     has x "$K/var/log/switchback.log" "quic: the package's way replaced"
+check "quic update: other kept" has x "$NQ" 'NFQWS_ARGS_CUSTOM="--filter-tcp=80 --lua-desync=fake"'
+sb_k update
+check "quic update: once"       hasnt x "$K/out" "новый способ для QUIC"
+sb_k tune quic next
+check "quic next: exit 0"       equal x "$RC" 0
+check "quic next: way 2"        has x "$NQ" '--payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=12"'
+check "quic next: copy kept"    exists x "$K/etc/switchback/nfqws2.conf.before-quic"
+check "quic next: said"         has x "$K/out" "способ 2 из 4"
+sb_k tune quic next; sb_k tune quic next
+check "quic next: two steps"    has x "$NQ" '--lua-desync=fake:blob=fake_default_quic:repeats=6 --lua-desync=udplen:increment=2"'
+sb_k tune quic undo
+check "quic undo: as before"    has x "$NQ" 'quic_initial:ip_autottl=-2,3-20:repeats=10"'
+check "quic undo: copy gone"    missing x "$K/etc/switchback/nfqws2.conf.before-quic"
+sb_k tune quic undo
+check "quic undo: nothing left" equal x "$RC" 1
+cat > "$K/conntrack-quic" <<'EOF'
+ipv4     2 udp      17 170 src=192.168.1.50 dst=142.250.1.1 sport=51000 dport=443 packets=10 bytes=2000 src=142.250.1.1 dst=100.64.0.2 sport=443 dport=51000 packets=900 bytes=3145728 [ASSURED] mark=0 use=2
+ipv4     2 udp      17 170 src=192.168.1.50 dst=74.125.1.1 sport=51001 dport=443 packets=10 bytes=2000 src=74.125.1.1 dst=100.64.0.2 sport=443 dport=51001 packets=9 bytes=10240 [ASSURED] mark=0 use=2
+ipv4     2 udp      17 170 src=100.64.0.2 dst=8.8.8.8 sport=51002 dport=443 packets=10 bytes=2000 src=8.8.8.8 dst=100.64.0.2 sport=443 dport=51002 packets=9 bytes=9999999 [ASSURED] mark=0 use=2
+EOF
+SB_CONNTRACK="$K/conntrack-quic" sb_k tune quic status
+check "quic status: the way"    has x "$K/out" "способ 1 из 4"
+check "quic status: bytes"      has x "$K/out" "142.250.1.1 — 3072 КБ"
+check "quic status: small too"  has x "$K/out" "74.125.1.1 — 10 КБ"
+check "quic status: home only"  hasnt x "$K/out" "8.8.8.8"
+check "quic status: passes"     has x "$K/out" "QUIC проходит"
+sed -i '/142.250.1.1/d' "$K/conntrack-quic"
+SB_CONNTRACK="$K/conntrack-quic" sb_k tune quic status
+check "quic status: fails"      has x "$K/out" "похоже, QUIC не проходит"
+sed -i 's|^NFQWS_ARGS_QUIC=.*|NFQWS_ARGS_QUIC="--filter-udp=443 --lua-desync=fake:blob=quic_initial:repeats=3"|' "$NQ"
+sb_k tune quic next
+check "quic hand-made: refused" equal x "$RC" 1
+check "quic hand-made: stays"   has x "$NQ" 'NFQWS_ARGS_QUIC="--filter-udp=443 --lua-desync=fake:blob=quic_initial:repeats=3"'
+sb_k update
+check "quic hand-made: update"  has x "$NQ" 'NFQWS_ARGS_QUIC="--filter-udp=443 --lua-desync=fake:blob=quic_initial:repeats=3"'
 # uninstall takes all of it away
 printf 'uninstall_confirm=y\n' > "$K/u"; sb_k uninstall --answers "$K/u"
 check "copy removed"           missing x "$K/etc/switchback/app"
@@ -1253,6 +1581,323 @@ check "owrt: copy kept on upgrade" has x "$R/etc/sysupgrade.conf" "/etc/switchba
 check "owrt: sites kept"       has x "$R/etc/sysupgrade.conf" "/etc/switchback/sites"
 sb_o sites del blocked.example
 check "owrt: route removed"    has x "$R/uci.log" "uci -q delete network.sb_tg_10_2_2_2"
+
+# ---------- lists/: the values come from the files and are the same as the ones written in the code before ----------
+CASE=lists
+lv() { "$SH" -c ". '$SRC/lib/common.sh'; lists_load '$1' && eval \"printf %s \\\"\$$2\\\"\""; }
+check "lists: TG_NETS as before" equal x "$(lv "$SRC/lists" TG_NETS)" "91.108.56.0/255.255.252.0 91.108.4.0/255.255.252.0 91.108.8.0/255.255.252.0 91.108.16.0/255.255.252.0 91.108.12.0/255.255.252.0 149.154.160.0/255.255.240.0 91.105.192.0/255.255.254.0 91.108.20.0/255.255.252.0 185.76.151.0/255.255.255.0"
+check "lists: META_NETS as before" equal x "$(lv "$SRC/lists" META_NETS)" "31.13.24.0/255.255.248.0 31.13.64.0/255.255.192.0 45.64.40.0/255.255.252.0 57.144.0.0/255.252.0.0 66.220.144.0/255.255.240.0 69.63.176.0/255.255.240.0 69.171.224.0/255.255.224.0 74.119.76.0/255.255.252.0 102.132.96.0/255.255.240.0 103.4.96.0/255.255.252.0 129.134.0.0/255.255.0.0 147.75.208.0/255.255.240.0 157.240.0.0/255.255.0.0 163.70.128.0/255.255.128.0 173.252.64.0/255.255.192.0 179.60.192.0/255.255.252.0 185.60.216.0/255.255.252.0 185.89.216.0/255.255.252.0 204.15.20.0/255.255.252.0"
+check "lists: META_DOMAINS as before" equal x "$(lv "$SRC/lists" META_DOMAINS)" "instagram.com cdninstagram.com facebook.com facebook.net fbcdn.net fbsbx.com threads.com threads.net whatsapp.com whatsapp.net"
+check "lists: TV_NETS as before" equal x "$(lv "$SRC/lists" TV_NETS)" "64.233.160.0/19 66.102.0.0/20 72.14.192.0/18 74.125.0.0/16 108.177.0.0/17 142.250.0.0/15 172.217.0.0/16 172.253.0.0/16 173.194.0.0/16 192.178.0.0/15 209.85.128.0/17 216.58.192.0/19 216.239.32.0/19 208.117.224.0/19 208.65.152.0/22 64.15.112.0/20"
+check "lists: ZAPRET_DOMAINS as before" equal x "$(lv "$SRC/lists" ZAPRET_DOMAINS)" "instagram.com cdninstagram.com fbcdn.net facebook.com facebook.net fb.com fbsbx.com"
+check "lists: DNS_CLAUDE as before" equal x "$(lv "$SRC/lists" DNS_CLAUDE)" "claude.ai claude.com claudeusercontent.com anthropic.com"
+check "lists: DNS_CHATGPT as before" equal x "$(lv "$SRC/lists" DNS_CHATGPT)" "chatgpt.com openai.com oaistatic.com oaiusercontent.com"
+check "lists: TUNE_WAYS as before" equal x "$(lv "$SRC/lists" TUNE_WAYS)" "$(cat <<'LISTEOF'
+fake-sni-google+multisplit|fake:blob=tls_clienthello:tls_mod=rnd,dupsid,sni=fonts.google.com:tcp_seq=10000 multisplit:pos=1,midsld:seqovl=1:seqovl_pattern=tls_clienthello:tcp_ts_up
+fake-ack+multisplit|fake:blob=0x00000000:tcp_ack=-66000:tls_mod=rnd,dupsid,sni=www.google.com:repeats=2 multisplit:pos=1,midsld
+hostfakesplit|hostfakesplit:host=ozon.ru:midhost=host-2:seqovl=sniext+3:seqovl_pattern=tls_clienthello:badsum:tcp_md5:tcp_ts_up hostfakesplit:tcp_md5:tcp_ts_up
+multidisorder|multidisorder:pos=1,midsld
+fake-md5+multidisorder|fake:blob=tls_clienthello:tls_mod=rnd,dupsid,sni=www.google.com:tcp_md5:repeats=4 multidisorder:pos=1,midsld
+fakedsplit|fakedsplit:pos=midsld:tcp_md5
+fakeddisorder|fakeddisorder:pos=midsld:tcp_md5
+hostfakesplit-ozon-md5|hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_md5:repeats=4
+fake-noack+fakeddisorder|fake:blob=0x00000000:tcp_flags_unset=ack fakeddisorder:pos=midsld:tcp_flags_unset=ack
+multidisorder-seqovl800|multidisorder:pos=1,midsld:seqovl=800:seqovl_pattern=tls_clienthello
+send+fake+fakedsplit-md5|send:repeats=1:tcp_md5 fake:blob=tls_clienthello:tcp_md5:tcp_ack=-10000000:tcp_ts_up fakedsplit:pos=midsld:tcp_md5:tcp_ack=-10000000:tcp_ts_up
+fake-google8+multisplit-seqovl|fake:blob=tls_clienthello:tcp_seq=10000000:repeats=8:tls_mod=rnd,dupsid,sni=www.google.com multisplit:pos=1:seqovl=681:seqovl_pattern=tls_clienthello
+LISTEOF
+)"
+check "lists: TUNE_VIDEO_WAYS as before" equal x "$(lv "$SRC/lists" TUNE_VIDEO_WAYS)" "$(cat <<'LISTEOF'
+multisplit:pos=sniext+1,midsld:seqovl=652
+fake:blob=tls_clienthello:repeats=6:tcp_ts=-600000
+multidisorder:pos=1,host+2,sld+2,sld+5,sniext+1,sniext+2,endhost-2:seqovl=1
+multisplit:pos=2:seqovl=681:seqovl_pattern=tls_clienthello:repeats=8:tcp_ts=-600000
+fake:blob=tls_clienthello:repeats=6:tcp_seq=2
+fake:blob=0x00000000:tcp_flags_unset=ack fakeddisorder:pos=midsld:tcp_flags_unset=ack
+multidisorder:pos=1,midsld:seqovl=800:seqovl_pattern=tls_clienthello
+LISTEOF
+)"
+check "lists: 12 tune ways"         equal x "$(lv "$SRC/lists" TUNE_WAYS | grep -c .)" 12
+# comments and blank lines are skipped, trailing spaces too
+mkdir -p "$WORK/lists-x"; cp "$SRC"/lists/* "$WORK/lists-x/"
+printf '# c\n\n1.2.3.0/255.255.255.0   # first\n  \n4.5.6.0/255.255.255.0\n' > "$WORK/lists-x/telegram.nets"
+check "lists: comments skipped"     equal x "$(lv "$WORK/lists-x" TG_NETS)" "1.2.3.0/255.255.255.0 4.5.6.0/255.255.255.0"
+# a missing or empty list stops install.sh before anything is done
+mkdir -p "$WORK/nolist-src"; cp -r "$SRC/install.sh" "$SRC/lib" "$SRC/platforms" "$SRC/lists" "$WORK/nolist-src/"
+rm "$WORK/nolist-src/lists/google.nets"
+keenetic nolist
+SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$WORK/nolist-src/install.sh" status > "$K/out" 2>&1; RC=$?
+check "lists: missing file stops"   equal x "$RC" 1
+check "lists: missing file named"   has x "$K/out" "Не найден lists/google.nets"
+printf '# nothing\n\n' > "$WORK/nolist-src/lists/google.nets"
+SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$WORK/nolist-src/install.sh" status > "$K/out" 2>&1; RC=$?
+check "lists: empty file stops"     equal x "$RC" 1
+check "lists: empty file named"     has x "$K/out" "Пустой список lists/google.nets"
+
+
+# ---------- the site doctor: sites doctor DOMAIN ----------
+keenetic doctorsite
+sb_k sites doctor https://Example.COM/page --progress
+check "doctor: opens -> device"     has x "$K/out" "example.com открывается с роутера"
+check "doctor: device verdict"      has x "$K/out" "@@sb	doc_end	device"
+check "doctor: no fix offered"      hasnt x "$K/out" "doc_fix"
+touch "$K/site-dead-blocked.example"; printf '10.9.9.1\n' > "$K/dns-blocked.example"
+sb_k sites doctor blocked.example --progress
+check "doctor: tunnel helps"        has x "$K/out" "Через туннель открывается"
+check "doctor: vpn first, zapret"   has x "$K/out" "@@sb	doc_fix	vpn	zapret"
+check "doctor: tunnel interface"    has x "$K/curl.log" "--interface nwg0"
+check "doctor: changes nothing"     missing x "$K/etc/switchback/sites"
+touch "$K/site-novpn-blocked.example"; sb_k sites doctor blocked.example --progress
+check "doctor: only zapret left"    has x "$K/out" "@@sb	doc_fix	zapret"
+echo blocked.example >> "$K/etc/nfqws2/lists/user.list"; sb_k sites doctor blocked.example --progress
+check "doctor: site itself down"    has x "$K/out" "@@sb	doc_end	down"
+touch "$K/site-dead-nodns.example"; sb_k sites doctor nodns.example --progress
+check "doctor: no address"          has x "$K/out" "Адрес сайта не находится"
+check "doctor: offers DNS"          has x "$K/out" "@@sb	doc_fix	dns"
+touch "$K/net-down"; sb_k sites doctor blocked.example --progress
+check "doctor: no internet"         has x "$K/out" "@@sb	doc_end	nonet"
+rm -f "$K/net-down"
+sb_k sites doctor 'a;reboot' --progress
+check "doctor: odd input refused"   equal x "$RC" 1
+check "doctor: says why"            has x "$K/out" "не похоже на адрес сайта"
+
+# ---------- the panel: on, its program (login, CSRF, input), next tunnel, off, uninstall ----------
+keenetic panel
+export SB_LAN_IP=192.168.1.1
+sb_k panel on
+check "panel: no server -> refused" equal x "$RC" 1
+check "panel: tried busybox"        has x "$K/opkg.log" "install busybox"
+printf '#!/bin/sh\necho "httpd $*" >> "$SB_OPT/httpd.log"\n' > "$K/bin/httpd"; chmod +x "$K/bin/httpd"
+SB_LAN_IP=8.8.8.8; sb_k panel on
+check "panel: public address no"    has x "$K/out" "не нашёл адрес роутера в домашней сети"
+SB_LAN_IP=192.168.1.1; sb_k panel on --progress
+P=$K/etc/switchback/panel; CGI=$P/www/cgi-bin/sb
+check "panel: on"                   equal x "$RC" 0
+check "panel: link event"           has x "$K/out" "@@sb	panel	on	http://192.168.1.1:8088/#t="
+check "panel: page"                 exists x "$P/www/index.html"
+check "panel: program filled in"    hasnt x "$CGI" "__"
+check "panel: token is 32 hex"      equal x "$(tr -dc 0-9a-f < "$P/token" | wc -c | tr -d ' ')" 32
+check "panel: home address only"    has x "$P/conf" "IP=192.168.1.1"
+check "panel: start job"            has x "$K/etc/cron.1min/sb-panel" 'netstat -ltn'
+check "panel: journal"              has x "$K/etc/switchback/state" "panel 192.168.1.1:8088"
+check "panel: page has no CDN"      hasnt x "$P/www/index.html" "https://"
+cgi() {   # cgi METHOD QUERY BODY [COOKIE] [ADDRESS] [LENGTH]
+  printf '%s' "$3" | REQUEST_METHOD=$1 QUERY_STRING=$2 CONTENT_LENGTH=${6:-${#3}} HTTP_COOKIE=$4 REMOTE_ADDR=${5:-192.168.1.20} \
+    SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic SB_PANEL_CACHE=$K/pcache "$SH" "$CGI" > "$K/cgi.out" 2>&1
+}
+cgi GET a=state "" "" 203.0.113.9
+check "cgi: outside home refused"   has x "$K/cgi.out" "только из домашней сети"
+cgi GET a=state ""
+check "cgi: needs login"            has x "$K/cgi.out" "401 Unauthorized"
+cgi GET a=login ""
+check "cgi: login only by POST"     has x "$K/cgi.out" "405"
+cgi POST a=login "t=00000000000000000000000000000000"
+check "cgi: wrong token refused"    has x "$K/cgi.out" "Ссылка неверная"
+check "cgi: no cookie for it"       hasnt x "$K/cgi.out" "Set-Cookie"
+cgi POST a=login "t=$(cat "$P/token")"
+check "cgi: cookie HttpOnly Strict" has x "$K/cgi.out" "HttpOnly; SameSite=Strict"
+SID=$(sed -n 's/^Set-Cookie: sb=\([0-9a-f]*\);.*/\1/p' "$K/cgi.out" | tr -d '\r')
+CS=$(sed -n 's/.*"csrf":"\([0-9a-f]*\)".*/\1/p' "$K/cgi.out")
+check "cgi: session and csrf"       equal x "${#SID}${#CS}" 3232
+cgi GET a=state "" "sb=$SID"
+check "cgi: services"               has x "$K/cgi.out" '"name":"YouTube","color":"green","how":"zapret"'
+check "cgi: tunnels"                has x "$K/cgi.out" '"name":"Wireguard0","up":true,"active":true'
+check "cgi: no switch without fo"   has x "$K/cgi.out" '"switch":false'
+check "cgi: cached"                 exists x "$K/pcache"
+cgi POST a=doctor "d=example.com" "sb=$SID"
+check "cgi: POST needs csrf"        has x "$K/cgi.out" "Страница устарела"
+cgi POST a=doctor "d=example.com&csrf=$CS" "sb=$SID"
+check "cgi: doctor answers"         has x "$K/cgi.out" "открывается с роутера"
+cgi POST a=doctor "d=x%3Breboot&csrf=$CS" "sb=$SID"
+check "cgi: bad domain refused"     has x "$K/cgi.out" "400 Bad Request"
+cgi POST a=doctor "d=\$(id)&csrf=$CS" "sb=$SID"
+check "cgi: no shell from input"    has x "$K/cgi.out" "400 Bad Request"
+cgi POST a=fix "d=blocked.example&way=rm&csrf=$CS" "sb=$SID"
+check "cgi: bad way refused"        has x "$K/cgi.out" "способ: zapret, vpn или dns"
+cgi POST a=fix "d=blocked.example&way=zapret&csrf=$CS" "sb=$SID"
+check "cgi: fix adds the site"      has x "$K/etc/switchback/sites" "zapret blocked.example"
+check "cgi: fix result shown"       has x "$K/cgi.out" "blocked.example добавлен в zapret"
+check "cgi: cache dropped"          missing x "$K/pcache"
+printf '10.9.9.1\n' > "$K/dns-blocked.example"
+cgi POST a=fix "d=blocked.example&way=vpn&csrf=$CS" "sb=$SID"
+check "cgi: other way replaces"     has x "$K/etc/switchback/sites" "vpn blocked.example"
+check "cgi: old way gone"           hasnt x "$K/etc/switchback/sites" "zapret blocked.example"
+cgi POST a=next "csrf=$CS" "sb=$SID"
+check "cgi: next without failover"  has x "$K/cgi.out" "Автосмена туннеля не установлена"
+printf 'TUNNELS="Wireguard0 Wireguard1"\n' > "$K/etc/switchback/failover.conf"
+printf '#!/bin/sh\necho "$*" > "$SB_OPT/fo.args"\n' > "$K/etc/cron.1min/wg-failover"; chmod +x "$K/etc/cron.1min/wg-failover"
+cgi POST a=next "csrf=$CS" "sb=$SID"
+check "cgi: next picks the next"    equal x "$(cat "$K/fo.args")" "--force Wireguard1"
+check "cgi: says it did not take"   has x "$K/cgi.out" "Wireguard1 не заработал"
+cgi GET "a=state&f=1" "" "sb=$SID"
+check "cgi: switch offered"         has x "$K/cgi.out" '"switch":true'
+cgi POST a=reboot "csrf=$CS" "sb=$SID"
+check "cgi: unknown action"         has x "$K/cgi.out" "404 Not Found"
+cgi POST a=doctor "d=example.com&csrf=$CS" "sb=$SID" 192.168.1.20 5000
+check "cgi: long body refused"      has x "$K/cgi.out" "413"
+cgi POST a=logout "csrf=$CS" "sb=$SID"
+cgi GET a=state "" "sb=$SID"
+check "cgi: logged out"             has x "$K/cgi.out" "401 Unauthorized"
+old=$(cat "$P/token"); sb_k panel token
+check "panel: new token"            equal x "$([ "$old" != "$(cat "$P/token")" ] && echo new)" new
+sb_k panel off
+check "panel: off removes files"    missing x "$P"
+check "panel: job gone"             missing x "$K/etc/cron.1min/sb-panel"
+check "panel: journal clean"        hasnt x "$K/etc/switchback/state" "panel "
+sb_k panel on
+printf 'uninstall_confirm=y\n' > "$K/a"; sb_k uninstall --answers "$K/a"
+check "uninstall: panel stopped"    has x "$K/out" "панель на роутере выключена"
+check "uninstall: panel files gone" missing x "$P"
+# a module of its own, chosen by hand only (not in the full set: see the plan event of the dry run above)
+keenetic panelmod
+printf '#!/bin/sh\n' > "$K/bin/httpd"; chmod +x "$K/bin/httpd"
+printf 'profile=custom\nmodules=panel\n' > "$K/a"; sb_k install --answers "$K/a" --progress
+check "module: panel step"          has x "$K/out" "@@sb	step	1	1	panel"
+check "module: panel on"            exists x "$K/etc/switchback/panel/www/cgi-bin/sb"
+unset SB_LAN_IP
+
+# ---------- the AI reserve (lib/ai.sh): DNS service -> Zapret DNS -> spare proxies -> VPN ----------
+keenetic ai
+echo 161.104.89.59 > "$K/zdns-ip"; touch "$K/zdns-cname"; echo 160.79.104.10 > "$K/vpn-ip"
+echo 10.0.0.5 > "$K/dns-claude.ai"; echo 10.0.0.6 > "$K/dns-chatgpt.com"   # the DoT service's nodes
+# the fake running-config keeps nothing by itself: Claude's DoT record is there already (ChatGPT's is built in)
+printf 'dns-proxy\n    tls upstream 5.6.7.8 sni dns.claude.example domain claude.ai\n!\n' > "$K/rc.extra"
+# the kernel's table: the route through the tunnel is there unless route-missing
+cat > "$K/bin/ip" <<'EOF'
+#!/bin/sh
+case "$*" in "route get "*)
+  if [ -f "$SB_OPT/route-missing" ]; then echo "$3 via 1.1.1.254 dev eth2.2"; else echo "$3 dev nwg0 src 10.8.0.2"; fi ;;
+esac
+EOF
+chmod +x "$K/bin/ip"
+cat > "$K/a" <<EOF
+profile=custom
+modules=zapret dns
+dns_claude=y
+dns_claude_ip=5.6.7.8
+dns_claude_sni=dns.claude.example
+ai_reserve=y
+EOF
+sb_k install --answers "$K/a"
+AI=$K/var/ai-path; J=$K/etc/cron.1min/ai-path
+NC=$(grep -vc '^#' "$SRC/lists/ai-claude.domains")
+check "ai: exit 0"                  equal x "$RC" 0
+check "ai: job installed"           exists x "$J"
+check "ai: no placeholders"         hasnt x "$J" "__"
+check "ai: Zapret DNS in zapret list" has x "$K/etc/nfqws2/lists/user.list" "dns.zapret.moe"
+check "ai: Claude stays on its DNS service" equal x "$(cat "$AI/cur.claude")" dns
+check "ai: Claude not pinned"       hasnt x "$K/ndmc.log" "ip host claude.ai"
+check "ai: ChatGPT stays on its DNS service" equal x "$(cat "$AI/cur.gpt")" dns
+check "ai: journal"                 has x "$K/etc/switchback/state" "ai"
+mkdir -p "$K/etc/watchdog"; printf 'TOKEN=%s\nCHAT=-100\nNTFY=https://ntfy.sh/sb-test\n' "$TOKEN" > "$K/etc/watchdog/bot.conf"
+aj() { SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$J" > "$K/aj.out" 2>&1; }
+date +%s > "$AI/refresh"; date +%s > "$AI/back"
+: > "$K/ndmc.log"; aj
+check "ai: alive: nothing done"     hasnt x "$K/ndmc.log" "ip host"
+# GeoHide dies: two dead runs, then Zapret DNS
+touch "$K/node-dead-10.0.0.5"; aj
+check "ai: one dead run: waits"     equal x "$(cat "$AI/bad.claude")" 1
+: > "$K/curl.log"; aj
+check "ai: Claude moved to Zapret DNS" equal x "$(cat "$AI/cur.claude")" zdns
+check "ai: Claude pinned"           has x "$K/ndmc.log" "ip host claude.ai 161.104.89.59"
+check "ai: every Claude name"       equal x "$(grep -c '^ndmc -c ip host .* 161.104.89.59$' "$K/ndmc.log")" "$NC"
+check "ai: ChatGPT left alone"      hasnt x "$K/ndmc.log" "ip host chatgpt.com"
+check "ai: asked through zapret"    has x "$K/curl.log" 'local-port = "61000-61099"'
+check "ai: stops at the first failure" has x "$K/curl.log" "fail-early"
+check "ai: told the bot"            has x "$K/curl.log" "sendMessage"
+check "ai: with buttons"            has x "$K/curl.log" "ai vpn"
+check "ai: and ntfy"                has x "$K/curl.log" "ntfy.sh/sb-test"
+check "ai: says what it did"        has x "$K/var/log/switchback.log" "Переключил на: Zapret DNS"
+check "ai: old value kept"          has x "$AI/pinned" "claude.ai -"
+# the router's DNS now answers the pin
+echo 161.104.89.59 > "$K/dns-claude.ai"; date +%s > "$AI/refresh"; aj
+check "ai: on Zapret DNS, alive"    missing x "$AI/bad.claude"
+# Zapret DNS's address dies too: the first spare proxy that answers (161... is first in the list: dead too)
+touch "$K/node-dead-161.104.89.59"; aj; : > "$K/ndmc.log"; aj
+check "ai: spare proxy taken"       equal x "$(cat "$AI/cur.claude")" proxy:159.194.200.33
+check "ai: pinned to it"            has x "$K/ndmc.log" "ip host claude.ai 159.194.200.33"
+# every proxy dead; the tunnel's route does not get into the kernel: nothing works -> alarm, routes taken back
+echo 159.194.200.33 > "$K/dns-claude.ai"
+for ip in $(grep -v '^#' "$SRC/lists/ai-claude-proxies.nets" | sed 's#/32##'); do touch "$K/node-dead-$ip"; done
+touch "$K/route-missing"; aj; : > "$K/curl.log"; : > "$K/ndmc.log"; aj
+check "ai: VPN route added"         has x "$K/ndmc.log" "ip route 160.79.104.10 255.255.255.255 Wireguard0 auto"
+check "ai: not in the kernel: taken back" has x "$K/ndmc.log" "no ip route 160.79.104.10 255.255.255.255 Wireguard0"
+check "ai: alarm"                   has x "$K/var/log/switchback.log" "не открывается ни одним путём"
+check "ai: alarm says what to do"   has x "$K/var/log/switchback.log" "Что сделать"
+check "ai: still on the last path"  equal x "$(cat "$AI/cur.claude")" proxy:159.194.200.33
+check "ai: route problem logged"    has x "$K/var/log/switchback.log" "не встал"
+: > "$K/curl.log"; aj
+check "ai: alarm not repeated at once" hasnt x "$K/curl.log" "sendMessage"
+# the route gets in: VPN
+touch "$K/vpn-none-claude.com"      # a name without an answer: the names after it keep their own answers
+rm -f "$K/route-missing"; : > "$K/ndmc.log"; : > "$K/curl.log"; aj
+check "ai: no answer, no pin"       hasnt x "$K/ndmc.log" "ip host claude.com 160.79.104.10"
+check "ai: the next name is its own" has x "$K/ndmc.log" "ip host api.anthropic.com 160.79.104.10"
+check "ai: the last name too"       has x "$K/ndmc.log" "ip host www.claudeusercontent.com 160.79.104.10"
+rm -f "$K/vpn-none-claude.com"
+check "ai: Claude through VPN"      equal x "$(cat "$AI/cur.claude")" vpn
+check "ai: real address pinned"     has x "$K/ndmc.log" "ip host claude.ai 160.79.104.10"
+check "ai: plain DNS 1.1.1.1 asked"  has x "$K/nslookup.log" "nslookup claude.ai 1.1.1.1"
+check "ai: no DoH bound to the tunnel" hasnt x "$K/curl.log" "1.1.1.1/dns-query"
+check "ai: the site checked through the tunnel" has x "$K/curl.log" "--interface nwg0 --resolve claude.ai:443:160.79.104.10"
+check "ai: route kept"              has x "$AI/routes" "claude 160.79.104.10"
+check "ai: back after the alarm"    has x "$K/var/log/switchback.log" "Claude снова открывается"
+# by hand: Zapret DNS again (alive again) for 24 h
+rm -f "$K/node-dead-161.104.89.59"; : > "$K/ndmc.log"; sb_k ai via zdns
+check "ai via zdns: exit 0"         equal x "$RC" 0
+check "ai via zdns: Claude"         equal x "$(cat "$AI/cur.claude")" zdns
+check "ai via zdns: VPN route gone" has x "$K/ndmc.log" "no ip route 160.79.104.10"
+check "ai via zdns: held by hand"   has x "$K/etc/switchback/ai.conf" "MODE=zdns"
+check "ai via zdns: says for how long" has x "$K/out" "вручную на 24 ч"
+# a path that does not work is not taken by hand
+echo 1.2.3.4 > "$K/vpn-ip"; touch "$K/node-dead-1.2.3.4"; sb_k ai via vpn
+check "ai via vpn (dead): refused"  has x "$K/out" "сайт сейчас не открывается"
+check "ai via vpn (dead): unchanged" equal x "$(cat "$AI/cur.claude")" zdns
+sb_k ai auto
+check "ai auto: back to auto"       has x "$K/etc/switchback/ai.conf" "MODE=auto"
+sb_k ai status
+check "ai status: Claude's path"    has x "$K/out" "Claude: Zapret DNS"
+check "ai status: only the reserve" hasnt x "$K/out" "·  статус"
+check "ai status: its own title"    has x "$K/out" "·  резерв для нейросетей"
+check "ai status: last check"       has x "$K/out" "последняя проверка: "
+check "ai status: last switch"      has x "$K/out" ", VPN (туннель Wireguard0) → Zapret DNS"
+check "ai status: since when"       has x "$K/out" "Claude: Zapret DNS (с "
+sb_k status
+check "ai: in the status"           has x "$K/out" "Резерв для нейросетей"
+sb_k sites add claude.ai --via vpn
+check "ai: own site via VPN -> the switch" has x "$K/out" "Claude через VPN"
+check "ai: own site not added"      hasnt x "$K/etc/switchback/sites" "claude.ai"
+# DoH answers are read with hexdump (busybox od on KeeneticOS has no -A/-t: the stub od refuses them as it does);
+# without hexdump, busybox's "od -b"
+check "ai: no od -A on the router"  hasnt x "$K/var/log/switchback.log" "invalid option"
+# readers that close early ("| head -1", "grep -q") left "sh: write error: Broken pipe" in the job's log (19.11.2026)
+check "ai: job log clean"           hasnt x "$K/var/ai-path/log" "write error"
+rm -f "$K/bin/hexdump"; : > "$K/ndmc.log"; sb_k ai via zdns
+check "ai: read without hexdump"    has x "$K/ndmc.log" "ip host claude.ai 161.104.89.59"
+# Zapret DNS answers 0.0.0.0 (seen 19.11.2026): no address, nothing pinned to it
+echo 0.0.0.0 > "$K/zdns-claude.ai"; : > "$K/ndmc.log"; sb_k ai via zdns
+check "ai: 0.0.0.0 is no address"   hasnt x "$K/ndmc.log" "0.0.0.0"
+check "ai: 0.0.0.0: path refused"   has x "$K/out" "сайт сейчас не открывается"
+rm -f "$K/zdns-claude.ai"
+: > "$K/ndmc.log"; sb_k ai off
+check "ai off: exit 0"              equal x "$RC" 0
+check "ai off: job gone"            missing x "$J"
+check "ai off: settings gone"       missing x "$K/etc/switchback/ai.conf"
+check "ai off: pins taken back"     has x "$K/ndmc.log" "no ip host claude.ai"
+check "ai off: journal clean"       hasnt x "$K/etc/switchback/state" "ai-path"
+sb_k ai on
+check "ai on again: job"            exists x "$J"
+printf 'uninstall_confirm=y\n' > "$K/u"; sb_k uninstall --answers "$K/u"
+check "ai uninstall: job gone"      missing x "$J"
+check "ai uninstall: Zapret DNS out of zapret list" hasnt x "$K/etc/nfqws2/lists/user.list" "dns.zapret.moe"
+# OpenWrt: the same, dnsmasq pins
+openwrt ai-owrt
+echo 161.104.89.59 > "$R/zdns-ip"
+printf 'profile=custom\nmodules=zapret dns\ndisable_offload=y\nai_reserve=y\n' > "$R/a"
+sb_o install --answers "$R/a"
+check "openwrt ai: exit 0"          equal x "$RC" 0
+check "openwrt ai: pinned"          has x "$R/uci.db" "/claude.ai/161.104.89.59"
+check "openwrt ai: minute job"      exists x "$R/etc/switchback/cron1/ai-path"
 
 echo ""
 echo "Тесты: прошло $PASS, не прошло $FAILED  (оболочка: $SH)"

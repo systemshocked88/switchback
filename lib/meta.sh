@@ -6,13 +6,9 @@
 # Keenetic gotcha: "ip name-server 1.1.1.1 DOMAIN" WITHOUT "on WireguardN" — with it the router's DNS
 # proxy failed its queries and silently fell back to the provider's DNS.
 
-META_NETS="31.13.24.0/255.255.248.0 31.13.64.0/255.255.192.0 45.64.40.0/255.255.252.0 57.144.0.0/255.252.0.0
-66.220.144.0/255.255.240.0 69.63.176.0/255.255.240.0 69.171.224.0/255.255.224.0 74.119.76.0/255.255.252.0
-102.132.96.0/255.255.240.0 103.4.96.0/255.255.252.0 129.134.0.0/255.255.0.0 147.75.208.0/255.255.240.0
-157.240.0.0/255.255.0.0 163.70.128.0/255.255.128.0 173.252.64.0/255.255.192.0 179.60.192.0/255.255.252.0
-185.60.216.0/255.255.252.0 185.89.216.0/255.255.252.0 204.15.20.0/255.255.252.0"
+# META_NETS: lists/meta.nets (lists_load in lib/common.sh)
 META_DNS=1.1.1.1
-META_DOMAINS="instagram.com cdninstagram.com facebook.com facebook.net fbcdn.net fbsbx.com threads.com threads.net whatsapp.com whatsapp.net"
+# META_DOMAINS: lists/meta.domains (lists_load in lib/common.sh)
 
 meta_route() {   # meta_route NET MASK IFACE: a route through the tunnel unless that network already goes somewhere
   via=$(pf_route_via "$1" "$2")

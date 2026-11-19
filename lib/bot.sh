@@ -21,7 +21,7 @@ bot_install() {
 bot_menu() {
   T=$(sed -n 's/^TOKEN=//p' "$BOT")
   curl -s -o /dev/null --max-time 15 "https://api.telegram.org/bot$T/setMyCommands" -H 'Content-Type: application/json' \
-    -d '{"commands":[{"command":"status","description":"Что установлено и работает ли"},{"command":"check","description":"Открываются ли сайты сейчас"},{"command":"report","description":"Отчёт для диагностики (файлом)"},{"command":"sites","description":"Свои сайты в обходе"},{"command":"tunnel","description":"Туннели; /tunnel ИМЯ — переключить"},{"command":"node","description":"Узлы Claude; /node best — закрепить быстрый"},{"command":"site","description":"/site add сайт vpn — добавить сайт"},{"command":"restart","description":"/restart zapret — перезапустить zapret"},{"command":"week","description":"Сводка за неделю"},{"command":"help","description":"Список команд"}]}'
+    -d '{"commands":[{"command":"status","description":"Что установлено и работает ли"},{"command":"check","description":"Открываются ли сайты сейчас"},{"command":"report","description":"Отчёт для диагностики (файлом)"},{"command":"sites","description":"Свои сайты в обходе"},{"command":"tunnel","description":"Туннели; /tunnel ИМЯ — переключить"},{"command":"ai","description":"Claude и ChatGPT: путь, «через VPN»"},{"command":"node","description":"Узлы Claude; /node best — закрепить быстрый"},{"command":"site","description":"/site add сайт vpn — добавить сайт"},{"command":"restart","description":"/restart zapret — перезапустить zapret"},{"command":"week","description":"Сводка за неделю"},{"command":"help","description":"Список команд"}]}'
   unset T
   return 0
 }
@@ -59,7 +59,8 @@ reply() {
   else curl -s -o /dev/null --max-time 20 "$API/sendMessage" -d chat_id="$CHAT" --data-urlencode text="$1"; fi
 }
 # the menu under the input field: a button sends its text, which command_of understands
-MENU='{"keyboard":[[{"text":"Что-то не работает"}],[{"text":"Статус"},{"text":"Проверка"}],[{"text":"Сайты"},{"text":"Туннели"}],[{"text":"Телевизор"},{"text":"Подобрать zapret"}],[{"text":"Узлы Claude"},{"text":"Сводка"}],[{"text":"Отчёт"},{"text":"Помощь"}]],"resize_keyboard":true,"is_persistent":true}'
+MENU='{"keyboard":[[{"text":"Что-то не работает"}],[{"text":"Статус"},{"text":"Проверка"}],[{"text":"Сайты"},{"text":"Туннели"}],[{"text":"Телевизор"},{"text":"Подобрать zapret"}],[{"text":"Claude"},{"text":"Узлы Claude"}],[{"text":"Сводка"},{"text":"Отчёт"}],[{"text":"Помощь"}]],"resize_keyboard":true,"is_persistent":true}'
+AI_KB='{"inline_keyboard":[[{"text":"Claude через VPN","callback_data":"ai vpn"},{"text":"Следующий путь","callback_data":"ai next"}],[{"text":"Авто","callback_data":"ai auto"},{"text":"Статус","callback_data":"ai"}]]}'
 YESNO='{"inline_keyboard":[[{"text":"Да","callback_data":"yes"},{"text":"Нет","callback_data":"no"}]]}'
 # buttons LABEL|DATA ...: one button per row under the message; pressing it sends DATA as a command
 buttons() {
@@ -72,6 +73,12 @@ pretty() {
       -e 's/^ *\[!!\]/!/' -e 's/^ *\[XX\]/✗/' -e 's/^ *\[dry\]/»/' -e 's/^  *//' -e 's/^Итог: /Итог: /' |
     grep -v '^$' | head -c 3500
 }
+# nocmd: the AI reserve's words for a person in Telegram: no router commands, the buttons and /ai instead
+# ("sh install.sh ai ..." stays in the installer's own output)
+nocmd() {
+  sed -e 's/sh install\.sh ai auto или //' -e 's/ или sh install\.sh ai [a-z ]*//' \
+      -e 's/(включить: sh install\.sh ai on)/(включить: команда «\/ai on»)/' -e 's/sh install\.sh ai on (или кнопкой в боте)/командой «\/ai on»/'
+}
 chk() {   # chk NAME URL
   r=$(curl --local-port 61000-61099 -s -o /dev/null --max-time 10 -w '%{http_code} %{time_total}' "$2" 2>/dev/null)
   c=${r%% *}; t=${r#* }
@@ -82,11 +89,12 @@ help_text() {
     "«Что-то не работает» (/diag) — бот сам ищет, в чём дело, и говорит, что делать" \
     "Пришлите адрес сайта (например, example.com) — бот проверит его и предложит пустить в обход" \
     "«Телевизор» (/tv) — устройства, у которых YouTube идёт через VPN; «Подобрать zapret» (/tune) — если YouTube снова тормозит" \
+    "/quic — видео в приложении YouTube на телефоне тормозит: сколько присылают серверы, другой способ для QUIC" \
     "/status или «статус» — что установлено и работает ли" "/check или «проверка» — открываются ли сайты сейчас" \
     "/report или «отчёт» — отчёт для диагностики файлом (пароли и ключи вырезаны)" "/sites или «сайты» — свои сайты в обходе" \
     "" "Действия (бот переспросит, ответьте «да»):" \
     "/tunnel — туннели; /tunnel Wireguard5 — пустить Telegram и Meta через него" \
-    "/node — узлы Claude и их скорость; /node best или /node 5.175.161.3 — закрепить Claude (для API: /node api best)" \
+    "/ai или «Claude» — каким путём идут Claude и ChatGPT; кнопки «Claude через VPN», «Следующий путь», «Авто»"     "/node — узлы Claude и их скорость; /node best или /node 5.175.161.3 — закрепить Claude (для API: /node api best)" \
     "/site add example.com vpn — пустить сайт через туннель (или zapret); /site del example.com — убрать" \
     "/restart zapret — перезапустить zapret" \
     "Пришлите архивы .zip (или файлы .conf) с серверами WireGuard — бот проверит каждый и добавит рабочие запасными туннелями" \
@@ -100,7 +108,7 @@ cyr() { r=""; for c; do r="$r${U}04$c"; done; printf '%s' "$r"; }   # cyr 41 42 
 W_STATUS=$(cyr 41 42 30 42 43 41); W_CHECK=$(cyr 3f 40 3e 32 35 40); W_SITES=$(cyr 41 30 39 42)
 W_REPORT1=$(cyr 3e 42 47 51 42); W_REPORT2=$(cyr 3e 42 47 35 42); W_YES=$(cyr 34 30)
 W_TUNNEL=$(cyr 42 43 3d 3d 35 3b); W_NODE=$(cyr 43 37 3b); W_WEEK=$(cyr 41 32 3e 34 3a); W_HELP=$(cyr 3f 3e 3c 3e 49)
-W_NO=$(cyr 3d 35 42); W_DIAG=$(cyr 47 42 3e); W_TV=$(cyr 42 35 3b 35 32); W_TUNE=$(cyr 3f 3e 34 3e 31)
+W_AI=$(cyr 3a 3b 3e 34); W_NO=$(cyr 3d 35 42); W_DIAG=$(cyr 47 42 3e); W_TV=$(cyr 42 35 3b 35 32); W_TUNE=$(cyr 3f 3e 34 3e 31)
 command_of() {
   t=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | sed -e 's/^ *//' -e 's#^/##' -e 's/@[^ ]*//' \
       -e 's/[\]u041\([0-9a-f]\)/\\u043\1/g' -e 's/[\]u042\([0-9a-f]\)/\\u044\1/g' -e 's/[\]u0401/\\u0451/g')
@@ -114,6 +122,8 @@ command_of() {
     no|n|cancel|"$W_NO"|нет|Нет|НЕТ) echo /no ;;
     tunnel|tunnels) echo "/tunnel $a" ;;
     "$W_TUNNEL"*|туннел*|Туннел*) echo /tunnel ;;          # the menu button "Туннели"
+    ai|claude|chatgpt) echo "/ai $a" ;;
+    "$W_AI"*|клод*|Клод*|нейрос*|Нейрос*) echo "/ai $a" ;;      # "Клод", "нейросети"
     node|nodes) echo "/node $a" ;;
     "$W_NODE"*|узл*|Узл*) echo /node ;;                    # "Узлы Claude"
     site) echo "/site $a" ;;
@@ -124,6 +134,7 @@ command_of() {
     tv) echo "/tv $a" ;;
     "$W_TV"*|телев*|Телев*) echo /tv ;;
     tune) echo "/tune $a" ;;
+    quic) echo "/quic $a" ;;
     "$W_TUNE"*|подобр*|Подобр*) echo /tune ;;
     wgb) echo "/wgb $a" ;;
     *.*) d=$(echo "$w" | sed -e 's#^[a-z]*:[\]*/[\]*/##' -e 's#[\]*/.*##' -e 's/^www\.//')    # a link or an address: check it
@@ -182,8 +193,9 @@ diag() {
 ✓ zapret (обход блокировок) работает"
       if opens https://www.youtube.com; then o="$o
 ✓ YouTube открывается"
+        addb "Видео на телефоне тормозит" quic
       else bad=1; o="$o
-✗ YouTube не открывается, хотя zapret работает: похоже, провайдер сменил блокировку. Помогает подбор настроек zapret (3–8 минут)."
+✗ YouTube не открывается, хотя zapret работает: похоже, провайдер сменил блокировку. Помогает подбор настроек zapret (4–11 минут)."
         addb "Подобрать zapret" tune; fi
     else bad=1; o="$o
 ✗ zapret не работает — YouTube и другие сайты могут не открываться. Сторож перезапускает его сам раз в 5 минут; можно сейчас кнопкой."
@@ -220,16 +232,18 @@ diag() {
   if [ -n "$b" ]; then reply "$o" "{\"inline_keyboard\":[$b]}"
   else reply "$o"; fi
 }
-diag_site() {   # diag_site DOMAIN: does it open from the router, and if not, buttons to add it
-  if opens "https://$1"; then
-    reply "✓ $1 открывается с роутера. Значит, дело в устройстве: перезапустите на нём Wi-Fi или браузер, выключите VPN-приложения и «Частный DNS», если они есть."
-  elif grep -q " $1\$" "$SITES" 2>/dev/null; then
-    reply "✗ $1 не открывается с роутера, хотя он уже в своих сайтах ($(awk -v d="$1" '$2 == d {print $1; exit}' "$SITES")). Попробуйте другой способ:" \
-      "$(buttons "Через VPN|site add $1 vpn" "Через zapret|site add $1 zapret")"
-  else
-    reply "✗ $1 не открывается с роутера. Пустить его в обход? Если не знаете, что выбрать, — сначала zapret (быстрее), не поможет — VPN." \
-      "$(buttons "Через zapret|site add $1 zapret" "Через VPN|site add $1 vpn")"
-  fi
+diag_site() {   # diag_site DOMAIN: the site doctor (install.sh sites doctor), with a button for each fix it offers
+  o=$(sh "$APP" sites doctor "$1" --progress --plain 2>&1)
+  fx=$(printf '%s\n' "$o" | sed -n 's/^@@sb	doc_fix	//p' | head -n 1 | tr '\t' ' ')
+  t=$(printf '%s\n' "$o" | grep -v '^@@sb' | pretty)
+  bl=""; for w in $fx; do
+    case $w in vpn) bl="$bl|Через VPN|site add $1 vpn" ;; zapret) bl="$bl|Через zapret|site add $1 zapret" ;; dns) bl="$bl|Через DNS|site add $1 dns" ;; esac
+  done
+  if [ -n "$bl" ]; then
+    set -f; IFS='|'; set -- ${bl#|}; unset IFS; set +f
+    b=""; while [ $# -ge 2 ]; do b="$b${b:+,}[{\"text\":\"$1\",\"callback_data\":\"$2\"}]"; shift 2; done
+    reply "${t:-Проверить не удалось.}" "{\"inline_keyboard\":[$b]}"
+  else reply "${t:-Проверить не удалось.}"; fi
 }
 
 handle() {   # handle COMMAND [ARGS]
@@ -302,10 +316,31 @@ $list"; return; }
 YouTube этих устройств идёт через VPN: стабильнее, но со скоростью туннеля. Добавить устройство: /tv add 192.168.1.50 tv"
                      if [ -n "$bl" ]; then reply "$txt" "{\"inline_keyboard\":[$bl]}"; else reply "$txt"; fi ;;
               esac ;;
+    /ai)      # the AI reserve (lib/ai.sh): which path Claude and ChatGPT take; the buttons switch at once (no
+              # "yes" step: the owner presses them when the service is down, and every path is checked first)
+              case $2 in
+                ""|status) reply "$(sh "$APP" ai status --plain 2>&1 | pretty | nocmd)" "$AI_KB" ;;
+                on)   reply "Включаю резерв для нейросетей, это до двух минут…"
+                      reply "$(sh "$APP" ai on --plain 2>&1 | pretty | nocmd | tail -n 8)" "$AI_KB" ;;
+                vpn|zdns|proxy|dns|next|auto)
+                      reply "$(case $2 in vpn) echo "Пускаю Claude и ChatGPT через VPN" ;; next) echo "Ищу следующий рабочий путь" ;;
+                               auto) echo "Выбираю лучший рабочий путь" ;; *) echo "Переключаю" ;; esac), это до двух минут…"
+                      reply "$(sh "$APP" ai "$2" --plain 2>&1 | pretty | nocmd)" "$AI_KB" ;;
+                *)    reply "Можно: /ai, /ai vpn, /ai next, /ai auto" "$AI_KB" ;;
+              esac ;;
     /tune)    if [ "$2" = undo ]; then confirm "tune undo" "Вернуть настройки zapret, какими они были до последнего подбора?"; return; fi
               if [ -f __CONF__/tune.running ] && [ $(( $(date +%s) - $(cat __CONF__/tune.running) )) -lt 900 ]; then
                 reply "Подбор уже идёт — пришлю итог, когда закончится."; return; fi
-              confirm "tune" "Подобрать настройки zapret? Это 3–8 минут, YouTube и другие сайты дома в это время могут подтормаживать. Если лучше не станет, ничего не изменится." ;;
+              confirm "tune" "Подобрать настройки zapret? Это 4–11 минут, YouTube и другие сайты дома в это время могут подтормаживать. Если лучше не станет, ничего не изменится." ;;
+    /quic)    case $2 in
+                next) confirm "tune quic next" "Включить другой способ для QUIC (видео в приложении YouTube на телефоне)? zapret перезапустится, сайты дома замрут на пару секунд." ;;
+                undo) confirm "tune quic undo" "Вернуть способ для QUIC, какой был до перебора?" ;;
+                *)    if [ -f __CONF__/nfqws2.conf.before-quic ]; then set -- "Другой способ для QUIC|quic next" "Вернуть как было|quic undo"
+                      else set -- "Другой способ для QUIC|quic next"; fi
+                      reply "$(sh "$APP" tune quic status --plain 2>&1 | pretty)
+
+Видео на телефоне тормозит, а серверы прислали мало? Включите другой способ, посмотрите видео минуту-две и снова нажмите «Видео на телефоне тормозит» (/quic)." "$(buttons "$@")" ;;
+              esac ;;
     /wgb)     nf=$(ls "$S/wg-in" 2>/dev/null | wc -l | tr -d ' ')
               case $2 in
                 drop) rm -rf "$S/wg-in"; reply "Присланные файлы удалены." ;;
@@ -332,7 +367,9 @@ run_pending() {
             reply "${out:-Автосмена сейчас занята — повторите через минуту.}" ;;
     node)   out=$(job "$J/claude-nodes" --pin "$a1" "$a2" | tail -n 3)
             reply "${out:-Автосмена узлов сейчас занята — повторите через минуту.}" ;;
-    site)   if [ "$a1" = add ]; then reply "$(sh "$APP" sites add "$a2" --via "$a3" --plain 2>&1 | pretty)"
+    site)   if [ "$a1" = add ]; then out=$(sh "$APP" sites add "$a2" --via "$a3" --plain 2>&1 | pretty)
+              # a site of an AI service: the reserve's switch instead of a dead end
+              case $out in *"Claude через VPN"*) reply "$(echo "$out" | nocmd)" "$AI_KB" ;; *) reply "$out" ;; esac
             else reply "$(sh "$APP" sites del "$a2" --plain 2>&1 | pretty)"; fi ;;
     zapret) reply "$(sh "$APP" act zapret-restart --plain 2>&1 | pretty)" ;;
     tv)     if [ "$a1" = add ]; then reply "$(sh "$APP" sites tv add "$a2" "$a3" --plain 2>&1 | pretty)"
@@ -342,8 +379,11 @@ run_pending() {
               [ -n "$x" ] && { grep -v "^${x%%=*}=" "$S/tv.off" 2>/dev/null; echo "$x"; } > "$S/tv.off.new" && mv "$S/tv.off.new" "$S/tv.off"
               reply "$(sh "$APP" sites tv del "$a2" --plain 2>&1 | pretty)"
             fi ;;
-    tune)   if [ "$a1" = undo ]; then reply "$(sh "$APP" tune --undo --plain 2>&1 | pretty)"; return; fi
-            reply "Начинаю подбор. Пришлю итог через 3–8 минут."
+    tune)   if [ "$a1" = quic ]; then
+              reply "$(sh "$APP" tune quic "$a2" --plain 2>&1 | pretty)" "$(buttons "Проверить|quic" "Другой способ для QUIC|quic next" "Вернуть как было|quic undo")"
+              return; fi
+            if [ "$a1" = undo ]; then reply "$(sh "$APP" tune --undo --plain 2>&1 | pretty)"; return; fi
+            reply "Начинаю подбор. Пришлю итог через 4–11 минут."
             # longer than the bot may stay: it goes on by itself and sends the result when done
             ( out=$(sh "$APP" tune --plain 2>&1 | pretty | tail -n 12)
               reply "${out:-Подбор не удался.}" "$(buttons "Вернуть как было|tune undo")" ) </dev/null >/dev/null 2>&1 &

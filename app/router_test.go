@@ -111,6 +111,9 @@ func TestConnectAndAnalyze(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(work, "remote", "lib", "doctor.sh")); err != nil {
 		t.Fatal("installer was not unpacked on the 'router'")
 	}
+	if _, err := os.Stat(filepath.Join(work, "remote", "lists", "telegram.nets")); err != nil {
+		t.Fatal("the lists did not come with the installer")
+	}
 
 	// installer fails on the router (no Entware): an error, not "warnings" (both exit 1)
 	a, _, _ = newApp()

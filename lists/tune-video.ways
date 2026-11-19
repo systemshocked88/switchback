@@ -1,0 +1,10 @@
+# The "circular" ways of the YouTube video servers' own zapret profile ("tune video on"): one way per
+# line, its steps space-separated; zapret moves on to the next way after two failures for a server.
+# "#" starts a comment, blank lines are skipped.
+multisplit:pos=sniext+1,midsld:seqovl=652
+fake:blob=tls_clienthello:repeats=6:tcp_ts=-600000
+multidisorder:pos=1,host+2,sld+2,sld+5,sniext+1,sniext+2,endhost-2:seqovl=1
+multisplit:pos=2:seqovl=681:seqovl_pattern=tls_clienthello:repeats=8:tcp_ts=-600000
+fake:blob=tls_clienthello:repeats=6:tcp_seq=2
+fake:blob=0x00000000:tcp_flags_unset=ack fakeddisorder:pos=midsld:tcp_flags_unset=ack
+multidisorder:pos=1,midsld:seqovl=800:seqovl_pattern=tls_clienthello

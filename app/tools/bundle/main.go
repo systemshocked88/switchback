@@ -1,4 +1,4 @@
-// bundle packs the router installer (install.sh, lib/, platforms/) into
+// bundle packs the router installer (install.sh, lib/, platforms/, lists/, panel/) into
 // app/installer/switchback.tar.gz, which is embedded into switchback.exe.
 // Runs before every build (wails.json preBuildHooks) and via `go generate`.
 package main
@@ -22,7 +22,7 @@ func main() {
 	repo := filepath.Dir(app)
 
 	var files []string
-	for _, pattern := range []string{"install.sh", "uninstall.sh", "lib/*.sh", "platforms/*.sh"} {
+	for _, pattern := range []string{"install.sh", "uninstall.sh", "lib/*.sh", "platforms/*.sh", "lists/*", "panel/*"} {
 		m, _ := filepath.Glob(filepath.Join(repo, filepath.FromSlash(pattern)))
 		files = append(files, m...)
 	}

@@ -1,5 +1,16 @@
 # "install.sh status": what switchback installed on this router and whether it works now. Changes nothing.
 
+# link_checks: the sites "Связь сейчас" asks, "name|address" words, only for what is set up on this router
+# (by switchback or by hand). "lists put" asks the same before and after new lists (lib/app.sh).
+link_checks() {
+  lc=""
+  [ -n "$(tg_via)" ] && lc="Telegram|https://api.telegram.org"
+  pf_dns_has claude.ai && lc="$lc claude.ai|https://claude.ai"
+  pf_dns_has chatgpt.com && lc="$lc chatgpt.com|https://chatgpt.com"
+  meta_on && lc="$lc Instagram|https://www.instagram.com"
+  echo "$lc"
+}
+
 do_status() {
   WARNINGS=0; PROBLEMS=0
   hr "Что установлено"
@@ -57,6 +68,10 @@ do_status() {
     if [ -n "$last" ]; then skip "последнее переключение: $(echo "$last" | cut -c1-16) — $(echo "$last" | sed 's/.*SWITCHED \([^ ]*\).*-> \([^ ]*\).*/\1 → \2/')"
     else skip "переключений ещё не было"; fi
   fi
+  if ai_on; then
+    sub "Резерв для нейросетей: Claude, ChatGPT"
+    ai_status
+  fi
   if [ -n "$CRON1" ] && [ -x "$CRON1/claude-nodes" ]; then
     sub "Claude: быстрый узел и запрет QUIC"
     ok "автосмена узлов стоит, проверка каждую минуту"
@@ -96,11 +111,7 @@ do_status() {
   [ -n "$missing" ] && warn "пропали пакеты:$missing — запустите установку ещё раз"
 
   # what is set up on the router now (by switchback or by hand), not only what switchback recorded
-  checks=""
-  [ -n "$(tg_via)" ] && checks="Telegram|https://api.telegram.org"
-  pf_dns_has claude.ai && checks="$checks claude.ai|https://claude.ai"
-  pf_dns_has chatgpt.com && checks="$checks chatgpt.com|https://chatgpt.com"
-  meta_on && checks="$checks Instagram|https://www.instagram.com"
+  checks=$(link_checks)
   if [ -n "$checks" ] && command -v curl >/dev/null 2>&1; then
     sub "Связь сейчас"
     for x in $checks; do

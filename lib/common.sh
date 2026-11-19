@@ -8,6 +8,18 @@ skip() { printf '  [--] %s\n' "$*"; }
 warn() { printf '  [!!] %s\n' "$*"; WARNINGS=$((WARNINGS+1)); }
 bad()  { printf '  [XX] %s\n' "$*"; PROBLEMS=$((PROBLEMS+1)); }
 hr()   { printf '\n=== %s ===\n' "$*"; }
+mod_skip() { skip "$@"; MOD_SKIP=1; }
+# zapret_wait: after a (re)start nfqws2 can take a few seconds to appear (a slow router CPU, the first start of
+# a fresh package): ask once a second, up to SB_ZAPRET_WAIT seconds (10; tests: short), before calling it dead
+zapret_wait() {
+  zw=${SB_ZAPRET_WAIT:-10}; [ -z "$SB_ZAPRET_WAIT" ] && [ -n "$SB_TEST" ] && zw=1
+  zi=0
+  until pf_zapret_running; do
+    [ "$zi" -ge "$zw" ] && return 1
+    sleep 1; zi=$((zi+1))
+  done
+  return 0
+}   # a whole module skipped: the summary says so, not "already set up"
 WARNINGS=0; PROBLEMS=0
 
 log() { [ "$DRY" = 1 ] && return 0; mkdir -p "${LOG%/*}" 2>/dev/null; printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
@@ -21,13 +33,22 @@ ev() {
   printf '%s\n' "$_ev"
 }
 
+# rand_hex BYTES: that many random bytes as hex digits. KeeneticOS's busybox od has no -A/-t (19.11.2026), OpenWrt's
+# busybox may have no od at all: hexdump first, then a full od, then tr
+rand_hex() {
+  r=$(head -c "$1" /dev/urandom 2>/dev/null | hexdump -v -e '/1 "%02x"' 2>/dev/null)
+  [ ${#r} -ge $(($1 * 2)) ] || r=$(head -c "$1" /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+  [ ${#r} -ge $(($1 * 2)) ] || r=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c $(($1 * 2)))
+  echo "$r"
+}
+
 # ---------- answers file (--answers FILE, or - for stdin) ----------
 # KEY=VALUE lines, # comments. Every question has a key; a question whose key is not in the
 # file gets its default answer, nothing is read from the keyboard. Format: docs/answers.md.
 ANSWER_KEYS="continue_with_warnings continue_with_problems profile modules start
 zapret_exclude_policy disable_offload no_quic
 dns_chatgpt dns_chatgpt_ip dns_chatgpt_sni dns_chatgpt_doh
-dns_claude dns_claude_ip dns_claude_sni dns_claude_doh
+dns_claude dns_claude_ip dns_claude_sni dns_claude_doh ai_reserve
 vpn_iface meta_vpn replace_watchdog replace_backup replace_bot bot_token bot_chat ntfy_url failover_tunnels replace_failover replace_nodes
 uninstall_confirm uninstall_packages uninstall_feeds"
 ANS_KEYS=""
@@ -89,11 +110,14 @@ append_line() {  # append_line FILE LINE
 #   https_feeds | nfqws_conf | list DOMAIN | dns SERVER... DOMAIN | route NET MASK IFACE
 #   uci KEY OLD_VALUE|- (OpenWrt setting changed) | crontab (OpenWrt: our lines in /etc/crontabs/root)
 #   file PATH | replaced PATH (original kept as PATH.before-switchback) | bot_conf | pkg NAME
+#   pkgdeps NAME... (OpenWrt: packages an install of ours brought in) | pkgfile PATH (OpenWrt: package source/key we added)
+#   cronfile (OpenWrt: /etc/crontabs/root did not exist before us: removed if empty after our lines are gone)
 #   keep PATH (OpenWrt: our line in /etc/sysupgrade.conf, kept across firmware upgrades)
 #   uci_list KEY VALUE (OpenWrt: a value added to a list) | wg NAME (WireGuard connection made from a .conf)
 #   quic IP ACL | acl_bind IFACE ACL (Keenetic QUIC rules) | host DOMAIN OLD_IP|- (domain pinned to a node)
 #   site WAY DOMAIN (own site: zapret|dns|vpn) | appdir PATH (switchback's own copy on the router)
 #   ns SERVER DOMAIN (plain DNS server for a domain: Meta via VPN) | conf_line FILE KEY (our KEY= line in a file that is not ours)
+#   ai (the AI reserve: its job, settings, the names it pinned and its routes; lib/ai.sh)
 remember() {
   [ "$DRY" = 1 ] && return 0
   mkdir -p "$SB_DIR"
@@ -127,15 +151,20 @@ undo_entry() {
     bot_conf)    run rm -f "$BOT" && ok "настройки бота удалены" ;;
     https_feeds) pf_feeds_restore && ok "источники пакетов восстановлены" ;;
     pkg)         pf_pkg_remove "$1" && ok "пакет $1 удалён" ;;
+    pkgdeps)     pf_pkgs_remove "$@" && ok "пакеты, которые ставил switchback, удалены: $*" ;;
+    pkgfile)     run rm -f "$1" && ok "источник пакетов убран: $1" ;;
+    cronfile)    [ -s "$CRONTAB" ] || { run rm -f "$CRONTAB" && ok "пустое расписание $CRONTAB удалено"; } ;;
     keep)        pf_keep_del "$1" && ok "$1 больше не сохраняется при обновлении прошивки" ;;
     uci_list)    pf_uci_list_del "$1" "$2" && ok "$2 убран из $1" ;;
     wg)          pf_wg_delete "$1" && ok "подключение WireGuard $1 удалено" ;;
     quic)        pf_quic_unblock "$1" "$2" && ok "правило QUIC для $1 убрано" ;;
     acl_bind)    pf_acl_unbind "$1" "$2" && ok "список правил $2 отвязан от $1" ;;
     host)        pf_host_restore "$1" "$2" && ok "закрепление $1 убрано" ;;
+    ai)          ai_undo ;;
     site)        site_undo "$1" "$2" && ok "свой сайт $2 убран" ;;
     ns)          pf_ns_del "$1" "$2" && ok "DNS-сервер $1 для $2 убран" ;;
     conf_line)   run sed -i "/^$2=/d" "$1" && ok "строка $2 убрана из $1" ;;
+    panel)       panel_stop "$1" && ok "панель на роутере выключена" ;;
     appdir)      run rm -rf "$1" && ok "копия switchback на роутере удалена" ;;
     *)           warn "не знаю, как отменить: $kind $*" ;;
   esac
@@ -149,7 +178,10 @@ rollback() {
   [ -s "$RUN_JOURNAL" ] || { say "Изменений в этом запуске не было, откатывать нечего."; return 0; }
   hr "Откат изменений этого запуска"
   sed '1!G;h;$!d' "$RUN_JOURNAL" | while read -r line; do
-    case $line in pkg\ *) skip "пакет ${line#pkg } оставляю установленным" ; continue ;; esac
+    case $line in
+      pkg\ *) skip "пакет ${line#pkg } оставляю установленным" ; continue ;;
+      pkgdeps\ *|pkgfile\ *) continue ;;   # they belong to the packages that stay installed
+    esac
     undo_entry "$line"
     grep -vxF "$line" "$STATE" > "$STATE.tmp" 2>/dev/null; mv "$STATE.tmp" "$STATE"
   done
@@ -190,4 +222,28 @@ sanitize() {
 report_leaks() {
   # a key/hash/token shape, or a secret word followed by anything but the mask (also after the mask)
   grep -nE "bot[0-9]{5,}:[A-Za-z0-9_-]{20,}|[A-Za-z0-9+/]{42,43}=|\\\$[0-9a-z]+\\\$[^ ]{8,}|(password|passwd|authentication|private[-_]key|preshared[-_]key|psk)( +|=)'?[^<' ]|(password|passwd|authentication|psk)[^ ]*( +|=)<скрыто> *[^ ]" "$1"
+}
+
+# ---------- lists ----------
+# The addresses, domains and zapret ways switchback applies live in lists/ next to install.sh (one entry per
+# line, "#" starts a comment, blank lines are skipped), so they can be changed without touching the code.
+# There is no copy inside the code: a missing or empty file stops install.sh before it changes anything (an
+# empty list would quietly mean "no Telegram routes", "no ways to try").
+LISTS="telegram.nets:TG_NETS:w meta.nets:META_NETS:w meta.domains:META_DOMAINS:w google.nets:TV_NETS:w
+zapret.domains:ZAPRET_DOMAINS:w claude.domains:DNS_CLAUDE:w chatgpt.domains:DNS_CHATGPT:w
+ai-claude.domains:AI_CLAUDE:w ai-chatgpt.domains:AI_CHATGPT:w ai-claude-proxies.nets:AI_CLAUDE_PROXIES:w ai-chatgpt-proxies.nets:AI_CHATGPT_PROXIES:w
+tune.ways:TUNE_WAYS:l tune-video.ways:TUNE_VIDEO_WAYS:l"
+# list_lines FILE: the entries, one per line
+list_lines() { sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e '/^$/d' "$1"; }
+# lists_load DIR: sets TG_NETS, TV_NETS, TUNE_WAYS... from DIR/*; "w" lists become one space-separated line
+# (TV_NETS goes into sed and awk), "l" lists keep one entry per line (a way has spaces between its steps)
+lists_load() {
+  for x in $LISTS; do
+    f=$1/${x%%:*}; v=${x#*:}; v=${v%:*}
+    [ -f "$f" ] || { echo "Не найден lists/${x%%:*}: запускайте install.sh из папки проекта целиком"; return 1; }
+    val=$(list_lines "$f") || return 1
+    [ -n "$val" ] || { echo "Пустой список lists/${x%%:*}: запускайте install.sh из папки проекта целиком"; return 1; }
+    [ "${x##*:}" = w ] && val=$(printf '%s\n' "$val" | tr '\n' ' ' | sed 's/ $//')
+    eval "$v=\$val"
+  done
 }

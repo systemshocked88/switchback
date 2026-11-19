@@ -1,0 +1,12 @@
+# Spare proxy addresses for ChatGPT (lib/ai.sh), like ai-claude-proxies.nets; AstraCat serves ChatGPT only.
+# One address per line, as ADDRESS/32; after "#" the service it belongs to (named in the bot's messages).
+161.104.89.59/32     # Zapret DNS
+159.194.200.33/32    # GeoHide
+193.233.112.67/32    # GeoHide
+193.233.112.68/32    # GeoHide
+193.233.112.88/32    # GeoHide
+91.132.224.167/32    # Comss DNS
+80.74.30.162/32      # Comss DNS
+103.137.248.145/32   # Comss DNS
+217.60.179.6/32      # AstraCat
+62.60.230.61/32      # DNS-AI

@@ -59,6 +59,10 @@ pf_doctor() {
   else ok "ускорение (flow offloading) выключено"; fi
   if ls /lib/modules/*/nft_queue.ko /lib/modules/*/xt_NFQUEUE.ko >/dev/null 2>&1; then ok "модуль очереди пакетов есть (нужен zapret)"
   else warn "не вижу модуля очереди пакетов (kmod-nft-queue): если zapret не запустится, поставьте его"; fi
+  # nfqws2-keenetic for opkg depends on the legacy iptables stack (seen on 24.10: ~20 packages, ~2-3 MB)
+  if [ "$PKGMGR" = opkg ] && ! pf_zapret_installed && ! pf_pkg_installed iptables-zz-legacy; then
+    note "zapret на OpenWrt с opkg потянет старый iptables (около 20 пакетов, 2–3 МБ во флеше); откат их уберёт"
+  fi
   for w in $(pf_vpn_ifaces); do
     if pf_vpn_is_global "$w"; then warn "$w пускает через VPN ВЕСЬ трафик (Route Allowed IPs). Для «только Telegram» это не нужно"
     else ok "$w: VPN только для выбранных адресов"; fi
@@ -107,7 +111,46 @@ pf_pkg_install() {
   pkg_update_once
   if [ "$PKGMGR" = apk ]; then run apk add "$@"; else run opkg install "$@"; fi
 }
-pf_pkg_remove() { if [ "$PKGMGR" = apk ]; then run apk del "$1"; else run opkg remove "$1"; fi; }
+pf_pkg_names() {   # installed package names, one per line
+  if [ "$PKGMGR" = apk ]; then apk info 2>/dev/null; else opkg list-installed 2>/dev/null | awk '{print $1}'; fi
+}
+# pkg_track_begin / pkg_track_end: remember the packages an install brought in that were not there before
+# ("pkgdeps NAME..."), so the uninstall can take exactly them away and nothing that was on the router before us
+pkg_track_begin() { PKG_BEFORE=$(pf_pkg_names | sort); }
+pkg_track_end() {
+  [ "$DRY" = 1 ] && return 0
+  new=$(pf_pkg_names | sort | while read -r p; do
+    printf '%s\n' "$PKG_BEFORE" | grep -qxF "$p" || printf '%s ' "$p"; done)
+  [ -n "$new" ] && remember "pkgdeps ${new% }"
+  return 0
+}
+pf_pkg_remove() {
+  pf_pkg_installed "$1" || return 0
+  if [ "$PKGMGR" = apk ]; then run apk del "$1"; else run opkg remove "$1" </dev/null; fi
+  pf_pkg_installed "$1" && return 1
+  case $1 in   # what the package leaves behind (conffiles we changed): ours to clean, the package was ours
+    nfqws2-keenetic) run rm -rf "$NFQ" ;;
+    https-dns-proxy) run rm -f "$ETC_DIR/config/https-dns-proxy" ;;
+  esac
+  return 0
+}
+# pf_pkgs_remove NAME...: remove packages that depend on each other; a package another one still needs is
+# retried after that one has gone. Anything that does not go after all passes is reported, not forced.
+pf_pkgs_remove() {
+  if [ "$DRY" = 1 ]; then dry "удалить пакеты: $*"; return 0; fi
+  left="$*"; pass=0
+  while [ -n "$left" ] && [ $pass -lt 6 ]; do
+    pass=$((pass+1)); next=""
+    for p in $left; do
+      pf_pkg_installed "$p" || continue
+      if [ "$PKGMGR" = apk ]; then apk del "$p" >/dev/null 2>&1; else opkg remove "$p" </dev/null >/dev/null 2>&1; fi
+      pf_pkg_installed "$p" && next="$next $p"
+    done
+    [ "$next" = "$left" ] && break
+    left=$next
+  done
+  [ -z "$(echo $left)" ] || { warn "не удалось удалить пакеты (их использует что-то ещё):$left"; return 1; }
+}
 
 pf_feeds_https() { return 2; }   # OpenWrt release feeds are https already
 pf_feeds_restore() { :; }
@@ -115,20 +158,31 @@ pf_feeds_restore() { :; }
 # ---------- zapret ----------
 pf_zapret_installed() { [ -x "$NFQ_INIT" ]; }
 pf_zapret_install() {
+  pkg_track_begin
   pf_pkg_install ca-certificates wget-ssl || return 1
   if [ "$PKGMGR" = apk ]; then
+    feed_file "$ETC_DIR/apk/keys/nfqws2-keenetic.pem"
     run wget -q -O "$ETC_DIR/apk/keys/nfqws2-keenetic.pem" "$NFQ_FEED/nfqws2-keenetic.pem" || return 1
+    feed_file "$ETC_DIR/apk/repositories.d/nfqws2-keenetic.list"
     echo "$NFQ_FEED/packages.adb" | write_file "$ETC_DIR/apk/repositories.d/nfqws2-keenetic.list"
-    run apk --update-cache add nfqws2-keenetic
+    run apk --update-cache add nfqws2-keenetic || return 1
   else
     run wget -q -O /tmp/nfqws2-keenetic.pub "$NFQ_FEED/nfqws2-keenetic.pub" || return 1
+    keys0=$(ls "$ETC_DIR/opkg/keys" 2>/dev/null)
     run opkg-key add /tmp/nfqws2-keenetic.pub || return 1
+    for k in $(ls "$ETC_DIR/opkg/keys" 2>/dev/null); do   # opkg-key names the file by the key's fingerprint
+      printf '%s\n' "$keys0" | grep -qxF "$k" || remember "pkgfile $ETC_DIR/opkg/keys/$k"
+    done
+    feed_file "$ETC_DIR/opkg/nfqws2-keenetic.conf"
     echo "src/gz nfqws2-keenetic $NFQ_FEED" | write_file "$ETC_DIR/opkg/nfqws2-keenetic.conf"
-    run opkg update >/dev/null && run opkg install nfqws2-keenetic
+    run opkg update >/dev/null && run opkg install nfqws2-keenetic || return 1
   fi
+  pkg_track_end
 }
+# feed_file PATH: a package-source file switchback is about to add (not there before): removed with our packages
+feed_file() { [ -e "$1" ] || remember "pkgfile $1"; }
 pf_zapret_conf_backup()  { [ -f "$NFQ_CONF.orig" ] || run cp "$NFQ_CONF" "$NFQ_CONF.orig"; }
-pf_zapret_conf_restore() { [ -f "$NFQ_CONF.orig" ] && run cp "$NFQ_CONF.orig" "$NFQ_CONF"; }
+pf_zapret_conf_restore() { [ -f "$NFQ_CONF.orig" ] && run cp "$NFQ_CONF.orig" "$NFQ_CONF" && run rm -f "$NFQ_CONF.orig"; }
 pf_zapret_restart()      { run "$NFQ_INIT" restart >/dev/null 2>&1; }
 pf_zapret_running()      { pidof nfqws2 >/dev/null 2>&1; }
 pf_list_del() { run sed -i "/^$(printf '%s' "$1" | sed 's/\./\\./g')\$/d" "$NFQ_LIST"; }
@@ -167,8 +221,9 @@ pf_dns_ask() {   # pf_dns_ask SERVICE -> DNS_SRV="127.0.0.1#PORT", DNS_LABEL
   ask "    Адрес DoH для $1:" "" "dns_$(echo "$1" | tr 'A-Z' 'a-z')_doh"; url=$REPLY
   case $url in https://*) ;; *) warn "адрес должен начинаться с https://, $1 пропускаю"; return 1 ;; esac
   if ! pf_pkg_installed https-dns-proxy; then
+    pkg_track_begin
     pf_pkg_install https-dns-proxy || fail "не удалось установить https-dns-proxy"
-    remember "pkg https-dns-proxy"
+    pkg_track_end; remember "pkg https-dns-proxy"
     DNS_CHANGED=1; CLI_CHANGED=1   # (re)installed, e.g. after a firmware upgrade: restart it with our settings
   fi
   # do not let it take over all DNS of the router: only our domains go to it
@@ -319,7 +374,12 @@ pf_save() {
   [ "$FW_CHANGED" = 1 ]  && run "$ETC_DIR/init.d/firewall" restart >/dev/null 2>&1
   [ "$NET_CHANGED" = 1 ] && run "$ETC_DIR/init.d/network" reload >/dev/null 2>&1
   if [ "$DNS_CHANGED" = 1 ]; then
-    [ -x "$ETC_DIR/init.d/https-dns-proxy" ] && run "$ETC_DIR/init.d/https-dns-proxy" restart >/dev/null 2>&1
+    # stop + start, not restart: its "restart" is a reload that never runs stop_service, and only stop_service
+    # gives dnsmasq back the noresolv/server it had (the package takes over all DNS when it is first installed)
+    if [ -x "$ETC_DIR/init.d/https-dns-proxy" ]; then
+      run "$ETC_DIR/init.d/https-dns-proxy" stop >/dev/null 2>&1
+      run "$ETC_DIR/init.d/https-dns-proxy" start >/dev/null 2>&1
+    fi
     run "$ETC_DIR/init.d/dnsmasq" restart >/dev/null 2>&1
   fi
   NET_CHANGED=0; DNS_CHANGED=0; FW_CHANGED=0
@@ -329,7 +389,8 @@ pf_reload() { :; }   # uci reads live settings, nothing to re-read
 
 # ---------- scheduler ----------
 pf_cron_setup() {
-  command -v curl >/dev/null || { pf_pkg_install curl || return 1; remember "pkg curl"; }
+  command -v curl >/dev/null || { pkg_track_begin; pf_pkg_install curl || return 1; pkg_track_end; remember "pkg curl"; }
+  [ -e "$CRONTAB" ] || remember "cronfile"
   added=0
   for l in "*/5 * * * * $CRON5/watchdog # switchback" "22 4 * * 0 $CRONW/backup # switchback" \
            "* * * * * for f in $CRON1/*; do [ -x \"\$f\" ] && \"\$f\"; done # switchback"; do
@@ -446,6 +507,7 @@ pf_nodes_funcs() {
 cat <<'EOF'
 nd_load()    { :; }
 nd_pinned()  { uci -q get dhcp.@dnsmasq[0].address | tr ' ' '\n' | awk -F/ -v d="$1" '$2 == d {print $3; exit}'; }
+nd_pins()    { uci -q get dhcp.@dnsmasq[0].address | tr ' ' '\n' | awk -F/ 'NF >= 3 {print $2, $3}'; }   # every pin: NAME IP
 nd_quic_ok() {   # an enabled rule rejecting UDP 443 to IP
   for s in $(uci show firewall 2>/dev/null | sed -n "s/^\(firewall\.[^=]*\)\.dest_ip='\{0,1\}$1'\{0,1\}\$/\1/p"); do
     uci -q get "$s.proto" | grep -qw udp || continue

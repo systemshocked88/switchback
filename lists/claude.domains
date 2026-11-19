@@ -1,0 +1,6 @@
+# Claude's domains asked from the DNS proxy service.
+# One entry per line; "#" starts a comment, blank lines are skipped.
+claude.ai
+claude.com
+claudeusercontent.com
+anthropic.com

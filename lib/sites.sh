@@ -33,7 +33,10 @@ VIDEO_DIRECT=3                # silent directly this many times in a row, a few 
                               # to the tunnel - YouTube then showed ads as abroad)
 VIDEO_BUDGET=40               # seconds one run may spend on checks (the job runs every minute)
 VIDEO_RECHECK=3600            # a routed server is checked through the tunnel again after this many seconds...
-VIDEO_PRUNE=2                 # ...this many in one run at most; silent there twice in a row: the route goes
+VIDEO_PRUNE=2                 # ...this many in one run at most; silent there twice in a row: the route goes;
+                              # one cut off by its address ("addr") is also asked directly, past its route: it
+                              # answers there twice in a row - the route goes too (seen 2026-11-18: 16 routes of
+                              # 48 answered directly again - Apple, Microsoft, Google - and slowed a phone down)
 VIDEO_NAME_TTL=${SB_VIDEO_NAME_TTL:-21600}   # a server routed for its name (it answers by its address) goes back
                               # to the direct way after 6 hours and is checked anew: the provider's cut-off of a
                               # name comes and goes, and zapret may have found a way meanwhile
@@ -142,6 +145,18 @@ addr_probe() {
 }
 addr_answers() { awk -v t="$(addr_probe "$@")" 'BEGIN { sub(",", ".", t); exit !(t + 0 > 0) }'; }   # was there a handshake
 addr_silent() { ! addr_answers "$1"; }                       # no handshake directly (through zapret)
+# addr_direct IP WANDEV: a handshake directly through zapret even when IP has a route to the tunnel: the router's
+# own request goes by the routing table too, so it is bound to the device of the way to the internet
+addr_direct() {
+  awk -v t="$(curl -sk -o /dev/null --max-time 5 $ZCURL --interface "$2" -w '%{time_appconnect}' "https://$1/" 2>/dev/null)" \
+    'BEGIN { sub(",", ".", t); exit !(t + 0 > 0) }'
+}
+# wan_dev: the device of the router's default route (SB_WAN_DEV in tests: nothing may reach the real "ip" there)
+wan_dev() {
+  [ -n "$SB_WAN_DEV" ] && { echo "$SB_WAN_DEV"; return 0; }
+  [ -n "$SB_TEST" ] && return 0
+  ip route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
 video_silent() { [ "$(video_probe "$1")" = 000 ]; }          # no answer from the video server directly
 # video_direct_dead CHECK IP: CHECK (addr_silent or video_silent) holds VIDEO_DIRECT times in a row, a pause between
 video_direct_dead() {
@@ -220,11 +235,26 @@ video_rescue() {
 # remembered as "dead", so it is not routed again for VIDEO_AGAIN_DEAD seconds.
 video_prune() {
   pdev=$(pf_wg_dev "$1"); pn=0
+  pwan=$(wan_dev); [ "$pwan" = "$pdev" ] && pwan=
   for pip in $(awk '$2 == "video" {print $1}' "$SITES_ROUTES" 2>/dev/null); do
     [ "$pn" -ge "$VIDEO_PRUNE" ] && break
     plast=$(awk -v i="$pip" '$1 == i {print $2 " " $3}' "$VIDEO_SEEN" 2>/dev/null | tail -n 1)
     [ -n "$plast" ] && [ $((vnow - ${plast%% *})) -lt "$VIDEO_RECHECK" ] && continue
     pn=$((pn+1))
+    # cut off by its address: does it answer directly again? Twice in a row (an hour apart): the route goes.
+    # A route for the name only is not asked so: its server answers by address anyway (video_expire takes it)
+    pk=$(awk -v i="$pip" '$1 == i {print $3; exit}' "$VIDEO_KIND" 2>/dev/null)
+    [ -n "$pk" ] || { if in_nets "$pip" "${SB_VIDEO_NETS:-$TV_NETS}"; then pk=name; else pk=addr; fi; }
+    if [ "$pk" = addr ] && [ -n "$pwan" ] && addr_direct "$pip" "$pwan"; then
+      case $plast in *" direct") ;; *) video_seen "$pip" direct; continue ;; esac   # once may be a hiccup: next hour
+      pvia=$(pf_route_via "$pip" 255.255.255.255); [ -n "$pvia" ] || pvia=$1
+      pf_route_del "$pip" 255.255.255.255 "$pvia"
+      [ "$DRY" = 1 ] || { awk -v i="$pip" '$1 != i' "$SITES_ROUTES" > "$SITES_ROUTES.tmp"; mv "$SITES_ROUTES.tmp" "$SITES_ROUTES"
+        awk -v i="$pip" '$1 != i' "$VIDEO_KIND" > "$VIDEO_KIND.tmp" 2>/dev/null; mv "$VIDEO_KIND.tmp" "$VIDEO_KIND"; }
+      video_seen "$pip" ok; CLI_CHANGED=1
+      log "server $pip: answers directly again (through zapret) - route through $1 removed"
+      continue
+    fi
     if in_nets "$pip" "${SB_VIDEO_NETS:-$TV_NETS}"; then pc=$(video_probe "$pip" "$pdev"); [ -n "$pc" ] && [ "$pc" != 000 ]
     else addr_answers "$pip" "$pdev"; fi && { video_seen "$pip" ok; continue; }
     case $plast in *" gone") ;; *) video_seen "$pip" gone; continue ;; esac     # once may be a hiccup: next hour
@@ -332,6 +362,14 @@ video_on() {
 site_add() {   # site_add DOMAIN WAY
   d=$(site_norm "$1"); way=$2
   site_valid "$d" || { bad "«$1» не похоже на адрес сайта (нужно вроде example.com)"; return 1; }
+  # Claude, ChatGPT through the tunnel: a route alone would not do (their names answer with the DNS service's
+  # nodes); the AI reserve switches DNS and routes together. Offered instead of a dead end (18.11.2026)
+  if [ "$way" = vpn ] && ai_domain "$d"; then
+    say "  $d — сайт нейросети: через VPN его пускает резерв для нейросетей, сразу вместе с DNS и маршрутами."
+    if ai_on; then say "  Переключить: кнопка «Claude через VPN» (команда боту /ai) или sh install.sh ai via vpn."
+    else say "  Включите резерв (команда боту /ai или sh install.sh ai on), затем кнопка «Claude через VPN»."; fi
+    ev site_res "$d" ai; return 0
+  fi
   if site_builtin "$d"; then skip "$d уже в обходе: он встроен в switchback"; ev site_res "$d" builtin; return 0; fi
   w=$(site_way "$d")
   if [ -n "$w" ]; then skip "$d уже добавлен (способ: $w)"; ev site_res "$d" exists "$w"; return 0; fi
@@ -441,7 +479,7 @@ site_check() {
 # routing rule per device ("from ADDRESS lookup TV_TABLE") and the routes of TV_NETS through the tunnel Telegram
 # uses now in that table; a device is found by its MAC, its last address is remembered while it is off.
 TV_TABLE=109
-TV_NETS="64.233.160.0/19 66.102.0.0/20 72.14.192.0/18 74.125.0.0/16 108.177.0.0/17 142.250.0.0/15 172.217.0.0/16 172.253.0.0/16 173.194.0.0/16 192.178.0.0/15 209.85.128.0/17 216.58.192.0/19 216.239.32.0/19 208.117.224.0/19 208.65.152.0/22 64.15.112.0/20"
+# TV_NETS: lists/google.nets (lists_load in lib/common.sh)
 
 tv_files() { TV_CONF=$SB_DIR/tv.devices; }
 # in tests nothing may reach the real "ip": only a fake one named in SB_IPCMD is called
@@ -601,6 +639,8 @@ do_sites() {
              : > "$RUN_JOURNAL"; hr "Добавляю сайт"; site_add "$2" "${SITE_VIA:-zapret}" ;;
     del)     [ -n "$2" ] || { say "Нужен адрес: sites del example.com"; return 2; }
              hr "Убираю сайт"; site_del "$2" ;;
+    doctor)  [ -n "$2" ] || { say "Нужен адрес: sites doctor example.com"; return 2; }
+             site_doctor "$2" ;;
     check)   [ -n "$2" ] || { say "Нужен адрес: sites check example.com"; return 2; }
              site_check "$2" ;;
     refresh) sites_refresh "$2" ;;
@@ -617,6 +657,6 @@ do_sites() {
                off) hr "Серверы видео YouTube через VPN"; site_del video ;;
                *)   say "Нужно: sites video on или sites video off"; return 2 ;;
              esac ;;
-    *)       say "Неизвестное действие: $act (list, add, del, check, video, tv)"; return 2 ;;
+    *)       say "Неизвестное действие: $act (list, add, del, check, doctor, video, tv)"; return 2 ;;
   esac
 }

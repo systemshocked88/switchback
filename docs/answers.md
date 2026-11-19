@@ -19,7 +19,7 @@ sh install.sh install --answers - < answers.txt     # из stdin: файл на 
 | Ключ | Значения | По умолчанию | Что это |
 |---|---|---|---|
 | `profile` | `full` `zapret` `dns` `vpn` `custom` | `full` | что ставить (то же, что `--profile`) |
-| `modules` | список через пробел: `https zapret dns nodes vpn watchdog failover` | — | модули для `profile=custom`; порядок всегда безопасный, какой бы ни был в файле |
+| `modules` | список через пробел: `https zapret dns nodes vpn meta watchdog failover panel` | — | модули для `profile=custom`; порядок всегда безопасный, какой бы ни был в файле |
 | `continue_with_warnings` | `y` / `n` | `y` | продолжать, если анализ нашёл предупреждения |
 | `continue_with_problems` | `y` / `n` | `n` | продолжать, если анализ нашёл серьёзные проблемы |
 | `start` | `y` / `n` | `y` | «Начинаем?» после плана |
@@ -30,6 +30,7 @@ sh install.sh install --answers - < answers.txt     # из stdin: файл на 
 | `dns_chatgpt_ip`, `dns_claude_ip` | IPv4 | — | Keenetic: IP DoT-сервера |
 | `dns_chatgpt_sni`, `dns_claude_sni` | имя | — | Keenetic: имя (SNI) DoT-сервера |
 | `dns_chatgpt_doh`, `dns_claude_doh` | `https://…/dns-query` | — | OpenWrt: адрес DoH |
+| `ai_reserve` | `y` / `n` | `n` | резерв для нейросетей (Claude, ChatGPT): если сайт перестал открываться, роутер сам переходит на другой путь — Zapret DNS, запасные адреса (`lists/ai-*-proxies.nets`), VPN — и пишет в бот и ntfy. Вручную: `sh install.sh ai via vpn` / `ai next` / `ai auto`, в боте `/ai` |
 | `vpn_iface` | имя подключения | первое найденное | через какое WireGuard пускать Telegram (Keenetic: `Wireguard0`, OpenWrt: `wg0`) |
 | `meta_vpn` | `y` / `n` | `y` | модуль `meta`: пускать Instagram, Facebook, WhatsApp и Threads через тот же туннель, что Telegram (сети Meta + DNS 1.1.1.1 через туннель) |
 | `bot_token` | токен от @BotFather | — | без него модуль «сторож и бэкап» пропускается с предупреждением |
@@ -86,6 +87,14 @@ bot_token=123456789:AA...
 | `site_dnsfree` | число | `sites list`: сколько ещё DNS-записей примет роутер |
 | `site_res` | сайт, `added`/`removed`/`exists`/`builtin`, способ | итог `sites add` / `sites del` |
 | `site_check` | сайт, `ok`/`down`, код ответа, время, с | `sites check` |
+| `doc` | шаг (`net`/`now`/`dns`/`zapret`/`vpn`), итог (`ok`/`bad`/`slow`/`cut`/`down`/`maybe`/`none`) | `sites doctor`: шаг проверки |
+| `doc_say` | вывод простыми словами | `sites doctor` |
+| `doc_fix` | способы для `sites add`, первый — главный | `sites doctor`: что поможет |
+| `doc_end` | `device`/`vpn`/`zapret`/`dns`/`slow`/`down`/`nonet`/`bad` | итог `sites doctor` |
+| `svc` | сервис, `green`/`yellow`/`red`, как идёт, слово | `panel state` |
+| `tun` / `tun_switch` | туннель, `up`/`down`, `active`/`standby` / `yes`/`no` | `panel state` |
+| `panel` | `on` и ссылка / `off` | `panel on|status|token|off` |
+| `next` | туннель, `ok`/`fail` | `panel next` |
 | `tune_try` | номер, всего, способ | `tune`: пробую способ |
 | `tune_res` | способ (`сейчас` — до подбора), открылось, всего, скорость YouTube (байт/с) | `tune`: замер |
 | `tune_done` | `applied` и записанные способы / `kept` / `undone` | итог `tune` |

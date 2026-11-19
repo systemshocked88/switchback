@@ -352,6 +352,7 @@ printf "QUIC_AWK='%s'\n" "$QUIC_AWK"
 cat <<'EOF'
 nd_load()    { CFG=$(ndmc -c 'show running-config'); }
 nd_pinned()  { echo "$CFG" | awk -v h="$1" '$1=="ip" && $2=="host" && $3==h {print $4; exit}'; }
+nd_pins()    { echo "$CFG" | awk '$1=="ip" && $2=="host" {print $3, $4}'; }   # every pin: NAME IP
 nd_quic_ok() { [ "$(echo "$CFG" | awk -v ip="$1" "$QUIC_AWK")" = on ]; }   # a switched-off rule does not count
 nd_pin()     { ndmc -c "no ip host $1" >/dev/null 2>&1; ndmc -c "ip host $1 $2" >/dev/null 2>&1; }
 nd_commit()  { ndmc -c 'system configuration save' >/dev/null 2>&1; }

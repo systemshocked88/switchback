@@ -1,3 +1,6 @@
 * text=auto
 # Scripts run on the router: Linux line endings only, or sh fails.
 *.sh text eol=lf
+# Lists read on the router: Linux line endings too.
+lists/* text eol=lf
+panel/* text eol=lf
