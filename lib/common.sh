@@ -118,6 +118,7 @@ append_line() {  # append_line FILE LINE
 #   site WAY DOMAIN (own site: zapret|dns|vpn) | appdir PATH (switchback's own copy on the router)
 #   ns SERVER DOMAIN (plain DNS server for a domain: Meta via VPN) | conf_line FILE KEY (our KEY= line in a file that is not ours)
 #   ai (the AI reserve: its job, settings, the names it pinned and its routes; lib/ai.sh)
+#   vless (VLESS through Xray: its service, rules, settings and the sites sent through it; lib/vless.sh)
 remember() {
   [ "$DRY" = 1 ] && return 0
   mkdir -p "$SB_DIR"
@@ -161,6 +162,7 @@ undo_entry() {
     acl_bind)    pf_acl_unbind "$1" "$2" && ok "список правил $2 отвязан от $1" ;;
     host)        pf_host_restore "$1" "$2" && ok "закрепление $1 убрано" ;;
     ai)          ai_undo ;;
+    vless)       vless_undo ;;
     site)        site_undo "$1" "$2" && ok "свой сайт $2 убран" ;;
     ns)          pf_ns_del "$1" "$2" && ok "DNS-сервер $1 для $2 убран" ;;
     conf_line)   run sed -i "/^$2=/d" "$1" && ok "строка $2 убрана из $1" ;;
@@ -212,7 +214,7 @@ sanitize() {
     -e "s/(password|passwd|psk|PSK|key|Key|KEY|token|TOKEN|secret|authentication)([A-Za-z_-]*)( +|=|: +)'?[^ '<]+'?/\1\2\3<скрыто>/g" \
     -e 's/bot[0-9]+:[A-Za-z0-9_-]+/bot<скрыто>/g' \
     -e 's#(NTFY=|ntfy\.sh/)[^ ]+#\1<скрыто>#g' \
-    -e 's#[A-Za-z0-9+/]{42,43}=#<ключ>#g' \
+    -e 's#[A-Za-z0-9+/]{42,43}=#<ключ>#g'     -e 's#vless://[^ ]*#vless://<скрыто>#g'     -e 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<uuid>/g' \
     -e 's/\$[0-9a-z]+\$[^ ]+/<хэш>/g' \
     -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/<mac>/g' \
     -e 's/(wireguard peer|endpoint|endpoint_host) +[^ ]+/\1 <скрыто>/g' \
@@ -221,7 +223,7 @@ sanitize() {
 # report_leaks FILE: still something that looks like a secret? (the report is not given out then)
 report_leaks() {
   # a key/hash/token shape, or a secret word followed by anything but the mask (also after the mask)
-  grep -nE "bot[0-9]{5,}:[A-Za-z0-9_-]{20,}|[A-Za-z0-9+/]{42,43}=|\\\$[0-9a-z]+\\\$[^ ]{8,}|(password|passwd|authentication|private[-_]key|preshared[-_]key|psk)( +|=)'?[^<' ]|(password|passwd|authentication|psk)[^ ]*( +|=)<скрыто> *[^ ]" "$1"
+  grep -nE "vless://[^<]|bot[0-9]{5,}:[A-Za-z0-9_-]{20,}|[A-Za-z0-9+/]{42,43}=|\\\$[0-9a-z]+\\\$[^ ]{8,}|(password|passwd|authentication|private[-_]key|preshared[-_]key|psk)( +|=)'?[^<' ]|(password|passwd|authentication|psk)[^ ]*( +|=)<скрыто> *[^ ]" "$1"
 }
 
 # ---------- lists ----------

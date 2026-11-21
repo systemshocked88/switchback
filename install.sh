@@ -16,7 +16,9 @@
 #   update      replace switchback's copy on the router and its scripts with this version (settings kept)
 #   lists       lists [status] | put (new lists on stdin; rolls back by itself if worse) | apply | restore (the previous ones back)
 #   panel       a page for phones at home: panel on|off|status|link|token (off by default)
-#   ai          reserve for Claude and ChatGPT: ai on|off|status | via vpn|zdns|proxy|dns [HOURS] | auto | next
+#   ai          reserve for Claude and ChatGPT: ai on|off|status | via vpn|zdns|proxy|dns|vless [HOURS] | auto | next
+#   vless       VLESS through Xray (Keenetic): vless set --conf FILE|- (the link: never in the command line) | status | test | off
+#               | sub set --conf FILE|- (a subscription: its address or its list) | sub check | sub status (lib/vsub.sh)
 #   tune        pick the best zapret settings for this provider (--undo: back to the ones before;
 #               tune video on|off: ways of their own for YouTube video servers;
 #               tune quic status|next|undo: the way for QUIC, the YouTube app on a phone)
@@ -31,7 +33,7 @@
 #
 # Supported: Keenetic / Netcraze (KeeneticOS + Entware), OpenWrt (opkg or apk).
 
-VERSION=0.7.6
+VERSION=0.7.7
 SB_SRC=$(cd "$(dirname "$0")" && pwd)
 OPT=${SB_OPT:-/opt}                       # overridable for tests only
 export PATH=$OPT/sbin:$OPT/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -40,8 +42,8 @@ CMD=install; DRY=0; PROFILE=""; ASSUME_YES=0; PLAIN=0; ANSWERS=""; PROGRESS=0; C
 SITES_ARGS=""; SITE_VIA=""; SITE_DNS_LIKE=""; TUNE_UNDO=0; CMD_SET=0
 while [ $# -gt 0 ]; do
   case $1 in
-    install|doctor|uninstall|status|wg-import|wg-batch|sites|update|tune|act|lists|panel|ai)
-      if [ "$CMD_SET" = 1 ] && { [ "$CMD" = sites ] || [ "$CMD" = tune ] || [ "$CMD" = ai ]; }; then SITES_ARGS="$SITES_ARGS $1"   # e.g. "sites check update.example", "tune quic status", "ai status" (the bot's /ai: not the router's whole status)
+    install|doctor|uninstall|status|wg-import|wg-batch|sites|update|tune|act|lists|panel|ai|vless)
+      if [ "$CMD_SET" = 1 ] && { [ "$CMD" = sites ] || [ "$CMD" = tune ] || [ "$CMD" = ai ] || [ "$CMD" = vless ]; }; then SITES_ARGS="$SITES_ARGS $1"   # e.g. "sites check update.example", "tune quic status", "ai status" (the bot's /ai: not the router's whole status)
       else CMD=$1; CMD_SET=1; fi ;;
     --via) SITE_VIA=$2; shift ;;
     --dns-like) SITE_DNS_LIKE=$2; shift ;;
@@ -59,9 +61,9 @@ while [ $# -gt 0 ]; do
     --answers=*) ANSWERS=${1#*=} ;;
     --progress) PROGRESS=1; PLAIN=1 ;;
     --plain) PLAIN=1 ;;
-    --help|-h) sed -n '2,31p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,32p' "$0"; exit 0 ;;
     -*) echo "Неизвестный параметр: $1 (см. --help)"; exit 2 ;;
-    *) if [ "$CMD" = sites ] || [ "$CMD" = act ] || [ "$CMD" = tune ] || [ "$CMD" = lists ] || [ "$CMD" = panel ] || [ "$CMD" = ai ]; then SITES_ARGS="$SITES_ARGS $1"
+    *) if [ "$CMD" = sites ] || [ "$CMD" = act ] || [ "$CMD" = tune ] || [ "$CMD" = lists ] || [ "$CMD" = panel ] || [ "$CMD" = ai ] || [ "$CMD" = vless ]; then SITES_ARGS="$SITES_ARGS $1"
        else echo "Неизвестный параметр: $1 (см. --help)"; exit 2; fi ;;
   esac
   shift
@@ -73,7 +75,7 @@ BACKUP_DIR=""
 VPN_IF=""
 STEP=""; STEPS=""; SUMMARY=""
 
-for f in common ui detect doctor modules uninstall status wireguard failover nodes report app sites bot tune meta digest heal panel ai; do
+for f in common ui detect doctor modules uninstall status wireguard failover nodes report app sites bot tune meta digest heal panel ai vless vsub; do
   [ -f "$SB_SRC/lib/$f.sh" ] || { echo "Не найден lib/$f.sh: запускайте install.sh из папки проекта целиком"; exit 1; }
   . "$SB_SRC/lib/$f.sh"
 done
@@ -93,7 +95,7 @@ detect_platform
 ev platform "$PLATFORM"
 case $CMD in install) what="установка" ;; doctor) what="анализ роутера" ;; uninstall) what="откат" ;;
   status) what="статус" ;; wg-import) what="WireGuard из файла" ;; wg-batch) what="туннели из архивов" ;; report) what="отчёт для диагностики" ;;
-  sites) what="свои сайты" ;; update) what="обновление" ;; lists) what="списки" ;; panel) what="панель" ;; ai) what="резерв для нейросетей" ;; tune) what="подбор настроек zapret" ;; act) what="действие" ;; esac
+  sites) what="свои сайты" ;; update) what="обновление" ;; lists) what="списки" ;; panel) what="панель" ;; ai) what="резерв для нейросетей" ;; vless) what="VLESS" ;; tune) what="подбор настроек zapret" ;; act) what="действие" ;; esac
 mode=""; [ "$DRY" = 1 ] && mode=" · пробный прогон, ничего не меняется"
 banner "switchback $VERSION  ·  обход блокировок на роутере" "$(platform_title "$PLATFORM")  ·  $what$mode"
 
@@ -107,6 +109,7 @@ fi
 SB_DIR=$ETC_DIR/switchback
 STATE=$SB_DIR/state
 LOG=$VAR_DIR/log/switchback.log
+vless_files
 pf_init
 
 case $CMD in
@@ -121,6 +124,7 @@ case $CMD in
   lists)     do_lists; exit $? ;;
   panel)     do_panel; exit $? ;;
   ai)        do_ai; exit $? ;;
+  vless)     do_vless; exit $? ;;
   tune)     do_tune; exit $? ;;
   act)       do_act; exit $? ;;
 esac

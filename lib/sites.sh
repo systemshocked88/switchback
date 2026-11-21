@@ -2,11 +2,14 @@
 #   zapret  the site is slowed down or cut off by the provider's filter (like YouTube): add it to zapret's list
 #   dns     the site says "not available in your country" (like ChatGPT): ask the DNS proxy service for it
 #   vpn     the site is blocked outright (like Telegram): its addresses go through the VPN tunnel
+#   vless   its addresses go to Xray (lib/vless.sh): off for every site unless the owner turns it on, one site at a
+#           time; "telegram" and "instagram" mean their whole networks (their apps connect by address). Heavy for
+#           the router's CPU: light traffic only
 # The VPN way works on any firmware version: the router looks up the site's addresses and routes each one
 # through the tunnel Telegram uses; a job every 5 minutes adds the new addresses (big sites change them).
 #
 #   sites [list]              what was added (and what is built in)
-#   sites add DOMAIN --via zapret|dns|vpn [--dns-like DOMAIN]
+#   sites add DOMAIN --via zapret|dns|vpn|vless [--dns-like DOMAIN]
 #   sites del DOMAIN          remove a site added here
 #   sites check DOMAIN        does it open from the router now
 #   sites refresh             (the 5-minute job) routes for new addresses of the VPN sites
@@ -99,14 +102,16 @@ vpn_routes() {
 # the job that adds new addresses of VPN sites (every minute by cron, works every 5th) and, when
 # "sites video on" was given, looks every minute for YouTube video servers that got cut off
 sites_job() {
-script_subst <<'EOF'
+script_subst <<'EOF' | sed "s|__XRAYINIT__|$VLESS_INIT|g"
 #!/bin/sh
 # Own sites through VPN (switchback): every 5 minutes, routes for new addresses of those sites;
 # every minute, YouTube video servers that stopped answering directly (if "sites video on").
 export PATH=__PATH__
 [ -f __CONF__/app/install.sh ] || exit 0
 m=$(date +%M); m=${m#0}
-if [ $((m % 5)) = 0 ] && grep -q -e '^vpn ' -e '^rescue ' __CONF__/sites 2>/dev/null; then what=""
+# own sites through VLESS: Xray back after a crash (its service puts the redirect rules back too)
+grep -q '^vless ' __CONF__/sites 2>/dev/null && [ -x __XRAYINIT__ ] && __XRAYINIT__ ensure >/dev/null 2>&1
+if [ $((m % 5)) = 0 ] && grep -q -e '^vpn ' -e '^rescue ' -e '^vless ' __CONF__/sites 2>/dev/null; then what=""
 elif grep -q '^rescue ' __CONF__/sites 2>/dev/null; then what=video
 else exit 0; fi
 sh __CONF__/app/install.sh sites refresh $what --plain >/dev/null 2>&1
@@ -361,15 +366,19 @@ video_on() {
 
 site_add() {   # site_add DOMAIN WAY
   d=$(site_norm "$1"); way=$2
+  # VLESS: Telegram and Instagram as a whole, by their networks (built in for the other ways, not for this one)
+  [ "$way" = vless ] && case $d in telegram|telegram.org|t.me) d=telegram ;; instagram|instagram.com|meta) d=instagram ;; esac
+  [ "$way" = vless ] && case $d in telegram|instagram) site_add_vless "$d"; return $? ;; esac
   site_valid "$d" || { bad "«$1» не похоже на адрес сайта (нужно вроде example.com)"; return 1; }
   # Claude, ChatGPT through the tunnel: a route alone would not do (their names answer with the DNS service's
   # nodes); the AI reserve switches DNS and routes together. Offered instead of a dead end (18.11.2026)
-  if [ "$way" = vpn ] && ai_domain "$d"; then
+  if { [ "$way" = vpn ] || [ "$way" = vless ]; } && ai_domain "$d"; then
     say "  $d — сайт нейросети: через VPN его пускает резерв для нейросетей, сразу вместе с DNS и маршрутами."
-    if ai_on; then say "  Переключить: кнопка «Claude через VPN» (команда боту /ai) или sh install.sh ai via vpn."
+    if ai_on; then say "  Переключить: кнопка «Claude через $( [ "$way" = vless ] && echo VLESS || echo VPN)» (команда боту /ai) или sh install.sh ai via $way."
     else say "  Включите резерв (команда боту /ai или sh install.sh ai on), затем кнопка «Claude через VPN»."; fi
     ev site_res "$d" ai; return 0
   fi
+  [ "$way" = vless ] && { site_add_vless "$d"; return $?; }
   if site_builtin "$d"; then skip "$d уже в обходе: он встроен в switchback"; ev site_res "$d" builtin; return 0; fi
   w=$(site_way "$d")
   if [ -n "$w" ]; then skip "$d уже добавлен (способ: $w)"; ev site_res "$d" exists "$w"; return 0; fi
@@ -408,7 +417,7 @@ site_add() {   # site_add DOMAIN WAY
         t=/tmp/switchback.new.$$; sites_job > "$t"
         install_file "$CRON1/sb-sites" "обновление адресов (каждые 5 минут)" "$t"
       fi ;;
-    *) bad "способ должен быть zapret, dns или vpn"; return 1 ;;
+    *) bad "способ должен быть zapret, dns, vpn или vless"; return 1 ;;
   esac
   remember "file $SITES"
   [ "$way" = vpn ] && remember "file $SITES_ROUTES"
@@ -420,10 +429,42 @@ site_add() {   # site_add DOMAIN WAY
   return 0
 }
 
+# site_add_vless NAME: the site's addresses (telegram, instagram: their networks) go to Xray
+site_add_vless() {
+  d=$1
+  vless_on || { bad "VLESS не настроен: сначала пришлите боту ссылку vless:// (или sh install.sh vless set --conf ФАЙЛ)"; return 1; }
+  w=$(site_way "$d")
+  if [ "$w" = vless ]; then skip "$(vless_title "$d") уже идёт через VLESS"; ev site_res "$d" exists vless; return 0; fi
+  [ -n "$w" ] && { bad "$d уже добавлен другим способом ($w): сначала уберите его"; return 1; }
+  case $d in telegram|instagram) addrs=$(vless_named "$d") ;; *) addrs=$(site_ips "$d") ;; esac
+  [ -n "$addrs" ] || { bad "не удалось узнать адреса $d: проверьте, что адрес написан верно"; return 1; }
+  [ "$DRY" = 1 ] && { dry "пустить $(vless_title "$d") через VLESS"; return 0; }
+  case $d in telegram|instagram) vless_ips_set "site:$d" $addrs ;; *) vless_ips_set "site:$d"; vless_ips_add "site:$d" $addrs ;; esac
+  vless_sync
+  vless_running || vless_start || warn "Xray сейчас не запущен: сайт пойдёт через VLESS, когда он заработает"
+  ok "$(vless_title "$d") $ARROW VLESS (адресов: $(vless_ips_count "site:$d"))"
+  note "$VLESS_CPU"
+  remember "file $SITES"
+  append_line "$SITES" "vless $d"
+  remember "site vless $d"
+  case $d in telegram|instagram) ;; *)    # new addresses of a site: the 5-minute job
+    self_install
+    if [ ! -f "$CRON1/sb-sites" ]; then
+      pf_cron_setup || { bad "не удалось включить планировщик"; return 1; }
+      t=/tmp/switchback.new.$$; sites_job > "$t"
+      install_file "$CRON1/sb-sites" "обновление адресов (каждые 5 минут)" "$t"
+    fi ;;
+  esac
+  ev site_res "$d" added vless
+  log "site added: vless $d"
+  return 0
+}
+
 # site_undo WAY DOMAIN: take the site out (used by "sites del" and by uninstall)
 site_undo() {
   sites_files
   case $1 in
+    vless)  vless_ips_del "site:$2" && vless_sync ;;
     zapret) pf_list_del "$2"; pf_zapret_restart ;;
     dns)    srv=$(pf_dns_srv_of "$2"); [ -n "$srv" ] && pf_dns_del $srv "$2" ;;
     vpn|rescue)
@@ -441,6 +482,7 @@ site_undo() {
 site_del() {
   d=$(site_norm "$1")
   w=$(site_way "$d")
+  [ -z "$w" ] && case $d in telegram|telegram.org|t.me) d=telegram; w=$(site_way telegram) ;; instagram|instagram.com|meta) d=instagram; w=$(site_way instagram) ;; esac
   if [ -z "$w" ]; then
     if site_builtin "$d"; then bad "$d встроен в switchback: убрать его можно только вместе со всем (Откатить всё)"
     else bad "$d не добавлялся через «Свои сайты»"; fi
@@ -591,8 +633,14 @@ tv_list() {
 }
 
 sites_refresh() {   # sites_refresh [video]: "video" = only the every-minute look for video servers
-  t=$(sites_tunnel); [ -n "$t" ] || return 0
   total=0
+  if [ "$1" != video ] && vless_on; then vn=0
+    for d in $(awk '$1 == "vless" && $2 ~ /\./ {print $2}' "$SITES" 2>/dev/null); do
+      vless_ips_add "site:$d" $(site_ips "$d") && { vn=1; log "site $d: new address(es) via VLESS"; }
+    done
+    [ "$vn" = 1 ] && vless_sync
+  fi
+  t=$(sites_tunnel); [ -n "$t" ] || { say "новых адресов: 0"; return 0; }
   [ "$1" = video ] || for d in $(awk '$1 == "vpn" {print $2}' "$SITES" 2>/dev/null); do
     vpn_routes "$d" "$t"; total=$((total + added))
     [ "$added" -gt 0 ] && log "site $d: $added new address(es) via $t"
@@ -611,6 +659,7 @@ sites_list() {
         zapret) ok "$d — zapret" ;;
         dns)    ok "$d — DNS" ;;
         vpn)    n=$(awk -v d="$d" '$2 == d' "$SITES_ROUTES" 2>/dev/null | wc -l); ok "$d — через VPN (адресов: $(echo $n))" ;;
+        vless)  ok "$(vless_title "$d") — через VLESS (адресов: $(vless_ips_count "site:$d"))" ;;
         rescue) n=$(awk -v d="$d" '$2 == d' "$SITES_ROUTES" 2>/dev/null | wc -l)
                 ok "серверы, которые глушит провайдер (YouTube и любые другие), — сами уходят в VPN (сейчас адресов: $(echo $n))" ;;
       esac
@@ -626,6 +675,7 @@ sites_list() {
   for c in claude.ai chatgpt.com; do pf_dns_has "$c" && ev site_dns "$c"; done
   ev site_dnsfree $(( DNS_LIMIT - $(pf_dns_count) ))
   t=$(sites_tunnel); [ -n "$t" ] && ev site_way vpn "$t"
+  vless_on && ev site_way vless
   return 0
 }
 
@@ -635,7 +685,7 @@ do_sites() {
   act=${1:-list}
   case $act in
     list)    sites_list ;;
-    add)     [ -n "$2" ] || { say "Нужен адрес: sites add example.com --via zapret|dns|vpn"; return 2; }
+    add)     [ -n "$2" ] || { say "Нужен адрес: sites add example.com --via zapret|dns|vpn|vless"; return 2; }
              : > "$RUN_JOURNAL"; hr "Добавляю сайт"; site_add "$2" "${SITE_VIA:-zapret}" ;;
     del)     [ -n "$2" ] || { say "Нужен адрес: sites del example.com"; return 2; }
              hr "Убираю сайт"; site_del "$2" ;;

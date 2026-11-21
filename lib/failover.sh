@@ -154,6 +154,20 @@ standby_check() {
   fi
 }
 
+# the last path (lib/vless.sh, "vless sos"): with every tunnel dead, Telegram, Meta and the VPN sites go through VLESS
+# for a while (unless the owner said no); back on WireGuard as soon as any tunnel answers
+SOS=__CONF__/vless.sos
+sos_on() {
+  [ $DRY = 0 ] && [ -f __CONF__/xray.json ] && [ ! -f "$SOS" ] && [ ! -f "$SOS.no" ] && [ -f __CONF__/app/install.sh ] || return 1
+  sh __CONF__/app/install.sh vless sos on --plain >/dev/null 2>&1; [ -f "$SOS" ]
+}
+sos_back() {
+  [ $DRY = 0 ] || return 0
+  rm -f "$SOS.no"; [ -f "$SOS" ] || return 0
+  sh __CONF__/app/install.sh vless sos off auto --plain >/dev/null 2>&1
+  log "a tunnel works again: Telegram, Meta and VPN sites back from VLESS"
+}
+
 fo_load
 ALL=$(fo_routes)                                 # lines: NET MASK TUNNEL KEY
 ACTIVE=$(echo "$ALL" | awk 'NF {print $3}' | sort | uniq -c | sort -rn | awk 'NR==1 {print $2}')
@@ -178,6 +192,7 @@ if [ -n "$FORCE" ]; then
 elif [ "$AH" -le "$MAX_HS" ]; then
   [ -f "$bad" ] && log "$ACTIVE ok again (handshake ${AH}s), was bad $(cat "$bad") runs"
   rm -f "$bad" "$S/last_try"
+  sos_back
   if [ -n "$STANDBY_NOW" ] || { [ "${SB_FO_TIME:-$(date +%H%M)}" = 0500 ] && [ "$(sed -n 's/^date \([^ ]*\).*/\1/p' "$S/standby" 2>/dev/null)" != "$(date +%F)" ]; }; then
     [ $DRY = 1 ] || standby_check
   fi
@@ -204,7 +219,10 @@ else
   if [ -z "$best" ]; then
     echo "$now" > "$S/last_try"
     log "$ACTIVE dead (handshake ${AH}s) and no standby answers"
-    [ -f "$S/nostandby.sent" ] || { send "✗ Туннель VPN $ACTIVE не отвечает, и ни один запасной тоже. Telegram и Instagram сейчас не работают. Что делать: добавьте новый конфиг WireGuard (программа switchback → «WireGuard из файла»). Пробую снова каждые $RETRY мин."; touch "$S/nostandby.sent"; }
+    if [ -f "$SOS" ]; then :
+    elif sos_on; then log "every tunnel dead: Telegram, Meta and VPN sites through VLESS until one answers"; touch "$S/nostandby.sent"
+    else [ -f "$S/nostandby.sent" ] || { send "✗ Туннель VPN $ACTIVE не отвечает, и ни один запасной тоже. Telegram и Instagram сейчас не работают. Что делать: добавьте новый конфиг WireGuard (программа switchback → «WireGuard из файла»). Пробую снова каждые $RETRY мин."; touch "$S/nostandby.sent"; }
+    fi
     exit 0
   fi
 fi
@@ -214,6 +232,7 @@ echo "$ROUTES" | while read -r net mask from key; do fo_move "$net" "$mask" "$AC
 fo_down "$ACTIVE"
 fo_commit "$ACTIVE" "$best"
 date +%s > "$S/last_switch"; rm -f "$bad" "$S/nostandby.sent" "$S/last_try"
+sos_back
 fo_load
 left=$(fo_routes | awk -v a="$ACTIVE" '$3 == a' | wc -l)
 why="handshake ${AH}s"; [ -n "$FORCE" ] && why="by hand"

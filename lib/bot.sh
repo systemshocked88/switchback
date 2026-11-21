@@ -21,7 +21,7 @@ bot_install() {
 bot_menu() {
   T=$(sed -n 's/^TOKEN=//p' "$BOT")
   curl -s -o /dev/null --max-time 15 "https://api.telegram.org/bot$T/setMyCommands" -H 'Content-Type: application/json' \
-    -d '{"commands":[{"command":"status","description":"Что установлено и работает ли"},{"command":"check","description":"Открываются ли сайты сейчас"},{"command":"report","description":"Отчёт для диагностики (файлом)"},{"command":"sites","description":"Свои сайты в обходе"},{"command":"tunnel","description":"Туннели; /tunnel ИМЯ — переключить"},{"command":"ai","description":"Claude и ChatGPT: путь, «через VPN»"},{"command":"node","description":"Узлы Claude; /node best — закрепить быстрый"},{"command":"site","description":"/site add сайт vpn — добавить сайт"},{"command":"restart","description":"/restart zapret — перезапустить zapret"},{"command":"week","description":"Сводка за неделю"},{"command":"help","description":"Список команд"}]}'
+    -d '{"commands":[{"command":"status","description":"Что установлено и работает ли"},{"command":"check","description":"Открываются ли сайты сейчас"},{"command":"report","description":"Отчёт для диагностики (файлом)"},{"command":"sites","description":"Свои сайты в обходе"},{"command":"tunnel","description":"Туннели; /tunnel ИМЯ — переключить"},{"command":"ai","description":"Claude и ChatGPT: путь, «через VPN»"},{"command":"vless","description":"VLESS: состояние, сайты через него"},{"command":"node","description":"Узлы Claude; /node best — закрепить быстрый"},{"command":"site","description":"/site add сайт vpn — добавить сайт"},{"command":"restart","description":"/restart zapret — перезапустить zapret"},{"command":"week","description":"Сводка за неделю"},{"command":"help","description":"Список команд"}]}'
   unset T
   return 0
 }
@@ -37,6 +37,7 @@ APP=__CONF__/app/install.sh
 SITES=__CONF__/sites
 S=__STATE__/sb-bot
 [ -f "$BOT" ] || exit 0
+umask 077                                          # its files may hold a VLESS link for a moment
 mkdir -p "$S"
 TOKEN=""; . "$BOT"
 [ -n "$TOKEN" ] || exit 0                          # only ntfy, no bot: nothing to answer
@@ -60,7 +61,9 @@ reply() {
 }
 # the menu under the input field: a button sends its text, which command_of understands
 MENU='{"keyboard":[[{"text":"Что-то не работает"}],[{"text":"Статус"},{"text":"Проверка"}],[{"text":"Сайты"},{"text":"Туннели"}],[{"text":"Телевизор"},{"text":"Подобрать zapret"}],[{"text":"Claude"},{"text":"Узлы Claude"}],[{"text":"Сводка"},{"text":"Отчёт"}],[{"text":"Помощь"}]],"resize_keyboard":true,"is_persistent":true}'
-AI_KB='{"inline_keyboard":[[{"text":"Claude через VPN","callback_data":"ai vpn"},{"text":"Следующий путь","callback_data":"ai next"}],[{"text":"Авто","callback_data":"ai auto"},{"text":"Статус","callback_data":"ai"}]]}'
+AI_KB='{"inline_keyboard":[[{"text":"Claude через VPN","callback_data":"ai vpn"},{"text":"через VLESS","callback_data":"ai vless"}],[{"text":"Следующий путь","callback_data":"ai next"},{"text":"Авто","callback_data":"ai auto"}],[{"text":"Статус","callback_data":"ai"}]]}'
+# the words that go with every "through VLESS" question (lib/vless.sh, VLESS_CPU)
+CPU="Весь трафик через VLESS шифрует процессор роутера: на слабом роутере это около 15–20 Мбит/с при полной загрузке — Telegram и лёгким сайтам хватит, видео будет тормозить, а остальной интернет дома может замедлиться."
 YESNO='{"inline_keyboard":[[{"text":"Да","callback_data":"yes"},{"text":"Нет","callback_data":"no"}]]}'
 # buttons LABEL|DATA ...: one button per row under the message; pressing it sends DATA as a command
 buttons() {
@@ -98,6 +101,9 @@ help_text() {
     "/site add example.com vpn — пустить сайт через туннель (или zapret); /site del example.com — убрать" \
     "/restart zapret — перезапустить zapret" \
     "Пришлите архивы .zip (или файлы .conf) с серверами WireGuard — бот проверит каждый и добавит рабочие запасными туннелями" \
+    "Пришлите ссылку vless:// (текстом или файлом .txt) — бот настроит Xray, а сообщение со ссылкой удалит" \
+    "Пришлите ссылку на подписку VLESS (https://…) или файл .txt со списком ключей — роутер проверит их и оставит 8 лучших как аварийный путь для Claude и ChatGPT; /vless check — перепроверить" \
+    "/vless — VLESS: работает ли, какие сайты через него (по умолчанию никакие); /site add example.com vless — свой сайт через VLESS" \
     "/week — сводка за неделю (сама приходит по субботам в 11:00)" "/help — этот список"
 }
 # the message text -> "COMMAND ARGS". Telegram sends Cyrillic as backslash-u escapes: lower-case it there too
@@ -123,6 +129,7 @@ command_of() {
     tunnel|tunnels) echo "/tunnel $a" ;;
     "$W_TUNNEL"*|туннел*|Туннел*) echo /tunnel ;;          # the menu button "Туннели"
     ai|claude|chatgpt) echo "/ai $a" ;;
+    vless|xray) echo "/vless $a" ;;
     "$W_AI"*|клод*|Клод*|нейрос*|Нейрос*) echo "/ai $a" ;;      # "Клод", "нейросети"
     node|nodes) echo "/node $a" ;;
     "$W_NODE"*|узл*|Узл*) echo /node ;;                    # "Узлы Claude"
@@ -137,6 +144,8 @@ command_of() {
     quic) echo "/quic $a" ;;
     "$W_TUNE"*|подобр*|Подобр*) echo /tune ;;
     wgb) echo "/wgb $a" ;;
+    vsub) echo "/vsub $a" ;;
+    vsos) echo "/vsos $a" ;;
     *.*) d=$(echo "$w" | sed -e 's#^[a-z]*:[\]*/[\]*/##' -e 's#[\]*/.*##' -e 's/^www\.//')    # a link or an address: check it
          if site_ok "$d"; then echo "/diag $d"; else echo /help; fi ;;
     *) echo /help ;;
@@ -290,8 +299,9 @@ $list"; return; }
               confirm "node $g $x" "Закрепить Claude ($g) за $( [ "$x" = best ] && echo 'самым быстрым узлом' || echo "узлом $x")?" ;;
     /site)    case $2 in
                 add) site_ok "$3" || { reply "Нужно: /site add example.com vpn"; return; }
-                     way=${4:-vpn}; case $way in vpn|zapret|dns) ;; *) reply "Способ: vpn, zapret или dns"; return ;; esac
-                     confirm "site add $3 $way" "Добавить $3 (способ: $way)?" ;;
+                     way=${4:-vpn}; case $way in vpn|zapret|dns|vless) ;; *) reply "Способ: vpn, zapret, dns или vless"; return ;; esac
+                     if [ "$way" = vless ]; then confirm "site add $3 vless" "Пустить $3 через VLESS? $CPU"
+                     else confirm "site add $3 $way" "Добавить $3 (способ: $way)?"; fi ;;
                 del) site_ok "$3" || { reply "Нужно: /site del example.com"; return; }
                      confirm "site del $3" "Убрать $3 из своих сайтов?" ;;
                 *)   reply "Нужно: /site add example.com vpn или /site del example.com" ;;
@@ -322,11 +332,35 @@ YouTube этих устройств идёт через VPN: стабильне�
                 ""|status) reply "$(sh "$APP" ai status --plain 2>&1 | pretty | nocmd)" "$AI_KB" ;;
                 on)   reply "Включаю резерв для нейросетей, это до двух минут…"
                       reply "$(sh "$APP" ai on --plain 2>&1 | pretty | nocmd | tail -n 8)" "$AI_KB" ;;
-                vpn|zdns|proxy|dns|next|auto)
-                      reply "$(case $2 in vpn) echo "Пускаю Claude и ChatGPT через VPN" ;; next) echo "Ищу следующий рабочий путь" ;;
+                vpn|zdns|proxy|dns|next|auto|vless)
+                      reply "$(case $2 in vpn) echo "Пускаю Claude и ChatGPT через VPN" ;; vless) echo "Пускаю Claude и ChatGPT через VLESS" ;; next) echo "Ищу следующий рабочий путь" ;;
                                auto) echo "Выбираю лучший рабочий путь" ;; *) echo "Переключаю" ;; esac), это до двух минут…"
                       reply "$(sh "$APP" ai "$2" --plain 2>&1 | pretty | nocmd)" "$AI_KB" ;;
-                *)    reply "Можно: /ai, /ai vpn, /ai next, /ai auto" "$AI_KB" ;;
+                *)    reply "Можно: /ai, /ai vpn, /ai vless, /ai next, /ai auto" "$AI_KB" ;;
+              esac ;;
+    /vless)   # VLESS (lib/vless.sh): its state; own sites through it one by one (off by default), each asked first
+              case $2 in
+                on)  { [ "$3" = telegram ] || [ "$3" = instagram ] || site_ok "$3"; } || { reply "Нужно: /vless on telegram, /vless on instagram или /vless on example.com"; return; }
+                     confirm "site add $3 vless" "Пустить $3 через VLESS? $CPU" ;;
+                off) { [ "$3" = telegram ] || [ "$3" = instagram ] || site_ok "$3"; } || { reply "Нужно: /vless off telegram"; return; }
+                     confirm "site del $3" "Вернуть $3 на обычный путь (не через VLESS)?" ;;
+                check) handle /vsub check ;;
+                sub) reply "Пришлите ссылку на подписку VLESS (https://…) или файл .txt со списком ключей: роутер проверит их (Claude, ChatGPT, задержка, скорость) и оставит 8 лучших за балансировщиком — аварийный путь для нейросетей. Ссылку и ключи не повторяю, сообщение удалю." ;;
+                *)   out=$(sh "$APP" vless status --plain 2>&1 | pretty | nocmd)
+                     case $out in *"не настроен"*) reply "$out
+
+Пришлите ссылку vless:// текстом или файлом .txt — настрою Xray. Или ссылку на подписку (https://…) — проверю её ключи и оставлю лучшие. Ссылку и ключи не повторяю, сообщение со ссылкой удалю."; return ;; esac
+                     bl=""; [ -s __CONF__/vless.pool ] && bl="|Перепроверить ключи|vsub check"
+                     for x in telegram instagram; do
+                       if grep -q "^vless $x\$" "$SITES" 2>/dev/null; then bl="$bl|${x} — обратно мимо VLESS|vless off $x"
+                       else bl="$bl|${x} через VLESS|vless on $x"; fi
+                     done
+                     for x in $(awk '$1 == "vless" && $2 ~ /\./ {print $2}' "$SITES" 2>/dev/null); do bl="$bl|$x — обратно мимо VLESS|vless off $x"; done
+                     set -f; IFS='|'; set -- ${bl#|}; unset IFS; set +f
+                     b=""; while [ $# -ge 2 ]; do b="$b${b:+,}[{\"text\":\"$1\",\"callback_data\":\"$2\"}]"; shift 2; done
+                     reply "$out
+
+Через VLESS по умолчанию не идёт ничего. Кнопкой — пустить сайт через него (бот переспросит); свой сайт: /site add example.com vless. $CPU" "{\"inline_keyboard\":[$b]}" ;;
               esac ;;
     /tune)    if [ "$2" = undo ]; then confirm "tune undo" "Вернуть настройки zapret, какими они были до последнего подбора?"; return; fi
               if [ -f __CONF__/tune.running ] && [ $(( $(date +%s) - $(cat __CONF__/tune.running) )) -lt 900 ]; then
@@ -350,8 +384,25 @@ YouTube этих устройств идёт через VPN: стабильне�
                       confirm "wgb" "Проверить серверы из присланных файлов ($nf) и оставить рабочие (до 6) запасными туннелями? Каждый сервер включается на несколько секунд; на всё уходит от нескольких минут до часа." ;;
                 *)    reply "Пришлите архивы .zip (или файлы .conf) с серверами WireGuard, затем нажмите «Проверить и добавить». Сейчас получено файлов: $nf." ;;
               esac ;;
+    /vsub)    # a VLESS subscription (lib/vsub.sh): its check (asked first: it takes a while) or a recheck of the kept keys
+              if [ -d __STATE__/run/sb-vsub.lock ]; then reply "Проверка ключей подписки уже идёт — пришлю итог, когда закончится."; return; fi
+              case $2 in
+                go)    [ -f "$S/vsub-in" ] || { reply "Подписки нет — пришлите ссылку на неё снова."; return; }
+                       confirm "vsub" "Проверить ключи подписки на роутере и оставить 8 лучших как запасной путь для Claude и ChatGPT (открываются ли claude.ai, api.anthropic.com, chatgpt.com; задержка, скорость)? Обычно 10–60 минут; интернет дома в это время может немного подтормаживать." ;;
+                drop)  rm -f "$S/vsub-in"; reply "Хорошо, подписку не трогаю. Если это был сайт — пришлите только его адрес (example.com)." ;;
+                check) reply "Перепроверяю ключи подписки. Если живых меньше трёх — пройду подписку заново (это дольше). Пришлю итог."
+                       ( out=$(sh "$APP" vless sub check --plain 2>&1 | pretty | nocmd | tail -n 16)
+                         reply "${out:-Проверка не удалась.}" "$(buttons "VLESS: состояние|vless")" ) </dev/null >/dev/null 2>&1 &
+                       [ -n "$SB_BOT_ONCE" ] && wait ;;
+                *)     handle /vless sub ;;
+              esac ;;
+    /vsos)    # every WireGuard tunnel dead, Telegram, Meta and sites went to VLESS (lib/vless.sh "vless sos"): the owner says no
+              case $2 in
+                no) reply "$(sh "$APP" vless sos off no --plain 2>&1 | pretty | nocmd)" ;;
+                *)  handle /vless ;;
+              esac ;;
     /yes)     run_pending ;;
-    /no)     if [ -f "$S/pending" ]; then rm -f "$S/pending"; reply "Отменено."; else reply "Нечего отменять."; fi ;;
+    /no)     if [ -f "$S/pending" ]; then rm -f "$S/pending" "$S/vsub-in"; reply "Отменено."; else reply "Нечего отменять."; fi ;;
     *)        reply "$(help_text)" "$MENU" ;;
   esac
 }
@@ -389,6 +440,15 @@ run_pending() {
               reply "${out:-Подбор не удался.}" "$(buttons "Вернуть как было|tune undo")" ) </dev/null >/dev/null 2>&1 &
             [ -n "$SB_BOT_ONCE" ] && wait          # tests: the result before the next check
             ;;
+    vsub)   [ -f "$S/vsub-in" ] || { reply "Подписки нет — пришлите ссылку на неё снова."; return; }
+            mv "$S/vsub-in" "$S/vsub-job"
+            reply "Начинаю проверку ключей подписки. Пришлю итог, когда закончу."
+            # can take half an hour: it goes on by itself; the file with the address or the keys is wiped (SB_ANSWERS_RM)
+            ( out=$(SB_ANSWERS_RM=1 sh "$APP" vless sub set --conf "$S/vsub-job" --plain 2>&1 | pretty | nocmd | tail -n 18)
+              rm -f "$S/vsub-job"
+              reply "${out:-Проверка не удалась.}" "$(buttons "VLESS: состояние|vless" "Claude и ChatGPT|ai")" ) </dev/null >/dev/null 2>&1 &
+            [ -n "$SB_BOT_ONCE" ] && wait
+            ;;
     wgb)    [ -d "$S/wg-in" ] || { reply "Файлов нет — пришлите их снова."; return; }
             rm -rf "$S/wg-job"; mv "$S/wg-in" "$S/wg-job"; date +%s > __CONF__/wgb.running
             reply "Начинаю проверку серверов. Пришлю итог, когда закончу."
@@ -410,16 +470,56 @@ doc_in() {
   case $fname in
     *.zip|*.ZIP) ext=zip ;;
     *.conf|*.CONF) ext=conf ;;
-    *) reply "Этот файл мне не подходит. Пришлите архив .zip или файлы .conf с серверами WireGuard — проверю их и добавлю рабочие."; return ;;
+    *.txt|*.TXT) ext=txt ;;
+    *) reply "Этот файл мне не подходит. Пришлите архив .zip или файлы .conf с серверами WireGuard — проверю их и добавлю рабочие. Ссылку vless:// — текстом или файлом .txt."; return ;;
   esac
   fp=$(curl -s --max-time 20 "$API/getFile" -d file_id="$fid" | sed -n 's/.*"file_path":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')
   [ -n "$fp" ] || { reply "Не удалось получить файл (Telegram отдаёт ботам файлы до 20 МБ)."; return; }
+  if [ "$ext" = txt ]; then       # a VLESS link in a file: applied at once, the file wiped
+    ( umask 077; curl -s --max-time 30 -o "$S/vless-in" "https://api.telegram.org/file/bot$TOKEN/$fp" )
+    n=$(grep -c '[a-zA-Z]://' "$S/vless-in" 2>/dev/null)
+    if [ "${n:-0}" -le 1 ] && grep -q 'vless://' "$S/vless-in" 2>/dev/null; then vless_apply "$2"
+    elif [ "${n:-0}" -gt 1 ] || grep -q 'https\{0,1\}://' "$S/vless-in" 2>/dev/null ||
+         grep -q '^[A-Za-z0-9+/=_-]\{60,\}[[:space:]]*$' "$S/vless-in" 2>/dev/null; then
+      mv "$S/vless-in" "$S/vsub-in"; vsub_ask "$2" "Получил файл со списком ключей (подписку)."
+    else rm -f "$S/vless-in"; reply "В файле нет ссылки vless:// и списка ключей. Для WireGuard нужны файлы .conf или архивы .zip."; fi
+    return
+  fi
   mkdir -p "$S/wg-in"; chmod 700 "$S/wg-in"
   k=$(( $(ls "$S/wg-in" | wc -l) + 1 )); out="$S/wg-in/$k.$ext"
   ( umask 077; curl -s --max-time 60 -o "$out" "https://api.telegram.org/file/bot$TOKEN/$fp" )
   [ -s "$out" ] || { rm -f "$out"; reply "Не удалось скачать файл — пришлите его ещё раз."; return; }
   log "file received ($ext)"
   reply "Получил файл ($k). Пришлите остальные, затем нажмите кнопку." "$(buttons "Проверить и добавить|wgb go" "Отменить|wgb drop")"
+}
+
+# a VLESS link sent as text (lib/vless.sh): kept in a private file only while "vless set" reads it, never logged or
+# repeated; the message with it is deleted from the chat (it holds the key). Telegram escapes "/" as "\/" in JSON
+vless_in() {   # vless_in TEXT MESSAGE_ID
+  ( umask 077; printf '%s\n' "$1" | sed -e 's#[\]/#/#g' -e 's/[\]u0026/\&/g' -e 's/[\]u003[dD]/=/g' > "$S/vless-in" )
+  vless_apply "$2"
+}
+vless_apply() {   # vless_apply MESSAGE_ID: the link in $S/vless-in
+  log "vless link received"
+  [ -n "$1" ] && curl -s -o /dev/null --max-time 10 "$API/deleteMessage" -d chat_id="$CHAT" -d message_id="$1"
+  reply "Получил ссылку VLESS, настраиваю Xray, это до минуты…"
+  out=$(SB_ANSWERS_RM=1 sh "$APP" vless set --conf "$S/vless-in" --plain 2>&1 | pretty | nocmd)
+  rm -f "$S/vless-in"
+  reply "${out:-Не получилось.}
+
+Сообщение со ссылкой удалено из чата: в ней ключ. Через VLESS пока ничего не идёт: Claude — кнопкой «через VLESS» (/ai), свои сайты — /vless." "$(buttons "VLESS: сайты через него|vless" "Claude и ChatGPT|ai")"
+}
+
+# a VLESS subscription (lib/vsub.sh): its address as text, or a file with its list. The address gives every key: kept
+# in a private file until checked or cancelled, never logged or repeated, the message deleted
+vsub_like() {   # vsub_like URL: an address of a subscription rather than of a site (a path with "sub" or a long token)
+  echo "$1" | grep -Eq '^https?://[^/ ]+/([^ ]*[/._=?-])?sub|^https?://[^/ ]+/[^ ]*[A-Za-z0-9_-]{16,}'
+}
+vsub_ask() {   # vsub_ask MESSAGE_ID "what came": the subscription in $S/vsub-in, the check asked for
+  log "vless subscription received"
+  [ -n "$1" ] && curl -s -o /dev/null --max-time 10 "$API/deleteMessage" -d chat_id="$CHAT" -d message_id="$1"
+  reply "$2 Ссылку и ключи не повторяю, сообщение удалил. Проверить ключи на роутере и оставить 8 лучших за балансировщиком (Xray сам переключается, если ключ умер)?" \
+    "$(buttons "Проверить ключи|vsub go" "Не надо|vsub drop")"
 }
 
 process() {   # the updates in $1 (Telegram's answer): answer the owner's ones
@@ -443,20 +543,36 @@ process() {   # the updates in $1 (Telegram's answer): answer the owner's ones
         cq=$(echo "$u" | sed -n 's/.*"callback_query":{"id":"\([^"]*\)".*/\1/p')
         curl -s -o /dev/null --max-time 10 "$API/answerCallbackQuery" -d callback_query_id="$cq"
         text=$(echo "$u" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p') ;;
-      *'"document":{'*) doc_in "$u" </dev/null; END=$(( $(date +%s) + 150 )); continue ;;
+      *'"document":{'*) doc_in "$u" "$(echo "$u" | sed -n 's/.*"message_id":\([0-9]*\).*/\1/p')" </dev/null; END=$(( $(date +%s) + 150 )); continue ;;
       *) text=$(echo "$u" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p' | head -1) ;;
     esac
     [ -n "$text" ] || continue                         # a sticker, a photo...: nothing to answer
+    case $text in https:*|http:*)                      # a subscription's address: never logged, never lower-cased
+      su=$(printf '%s' "$text" | sed -e 's#[\]/#/#g' -e 's/[\]u0026/\&/g' -e 's/[\]u003[dD]/=/g')
+      if vsub_like "$su"; then
+        ( umask 077; printf '%s\n' "$su" > "$S/vsub-in" ); su=""
+        vsub_ask "$(echo "$u" | sed -n 's/.*"message_id":\([0-9]*\).*/\1/p')" "Похоже на ссылку на подписку VLESS." </dev/null
+        END=$(( $(date +%s) + 300 )); continue
+      fi
+      su="" ;;
+    esac
+    case $text in *vless:*)                            # a VLESS link: never logged, never lower-cased
+      vless_in "$text" "$(echo "$u" | sed -n 's/.*"message_id":\([0-9]*\).*/\1/p')" </dev/null
+      END=$(( $(date +%s) + 150 )); continue ;;
+    esac
     cmd=$(command_of "$text")
     log "command $cmd"
     handle $cmd </dev/null
     END=$(( $(date +%s) + 150 ))      # after a command: answer within seconds for a while
   done < "$S/batch"
+  rm -f "$S/batch"                    # it may hold a VLESS link
 }
 
 set -f                                  # message text is never expanded into file names
 # one quick look; after a command the bot stays and answers within seconds for ~2.5 minutes, then exits
 off=$(cat "$S/offset" 2>/dev/null || echo 0)
+# a subscription nobody pressed «Проверить ключи» for in 10 minutes: gone (it holds every key)
+[ -f "$S/vsub-in" ] && [ -n "$(find "$S/vsub-in" -mmin +10 2>/dev/null)" ] && rm -f "$S/vsub-in"
 END=0; wait=0
 while :; do
   r=$(curl -s --max-time $((wait + 15)) "$API/getUpdates?offset=$off&timeout=$wait") || break

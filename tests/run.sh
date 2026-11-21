@@ -1,15 +1,77 @@
 #!/bin/sh
 # Automatic tests of install.sh on fake routers (no real router is touched).
-#   sh tests/run.sh            (uses dash if present: closest to BusyBox ash on routers)
-# Each case builds a fresh fake Keenetic /opt or OpenWrt root in a temp folder.
+#   sh tests/run.sh              all of them: the groups run side by side, at most 4 at a time, at the lowest
+#                                priority, so the computer stays responsive (SB_JOBS=1: one after another;
+#                                SB_NICE=0: the normal priority)
+#   sh tests/run.sh vless ai     only these groups (the same: TESTS=vless,ai sh tests/run.sh)
+#   sh tests/run.sh --list       the groups and what they test
+# Uses dash if present (closest to BusyBox ash on routers). Each case builds a fresh fake Keenetic /opt or
+# OpenWrt root in a temp folder. Every group has a temp folder of its own, also for the files the scripts
+# put in "/tmp" (SB_TMP), so groups running side by side never see each other's files.
+# A group is every section whose title line ends in "[NAME]": its sections run in the order of this file,
+# on their own (a group never uses what another one made). A new section needs a group: an old name or a new one.
 
-HERE=$(cd "$(dirname "$0")" && pwd)
+HERE=${SB_T_HERE:-$(cd "$(dirname "$0")" && pwd)}
 SRC=$(cd "$HERE/.." && pwd)
 SH=$(command -v dash || command -v sh)
+
+# ---- the runner: picks the groups, makes a script of each and runs them (the checks start further down) ----
+if [ -z "$SB_T_GROUP" ]; then
+  T=$HERE/run.sh
+  all=$(sed -n 's/^# ---------- .* \[\([a-z0-9-]*\)\]$/\1/p' "$T" | awk '!seen[$0]++')
+  if [ "$1" = --list ] || [ "$1" = -l ]; then
+    awk '/^# ---------- .* \[[a-z0-9-]*\]$/ { g = $NF; gsub(/[][]/, "", g); t = $0; sub(/^# -+ /, "", t); sub(/ -+ \[.*$/, "", t)
+           if (!(g in n)) { o[++k] = g; f[g] = t }; n[g]++ }
+         END { for (i = 1; i <= k; i++) { g = o[i]; printf "%-10s %s%s\n", g, f[g], (n[g] > 1 ? "  (+ ещё разделов: " n[g] - 1 ")" : "") } }' "$T"
+    exit 0
+  fi
+  want=$(echo $* $TESTS | tr ',' ' ')
+  for g in $want; do
+    case " $(echo $all) " in *" $g "*) ;; *) echo "Нет группы «$g». Группы: $(echo $all)"; exit 2 ;; esac
+  done
+  # all of them: the longest first, so that the last ones to finish are short
+  [ -n "$want" ] || want=$(for g in ai vless bot vsub openwrt failover $all; do echo "$g"; done | awk '!seen[$0]++')
+  n=$(echo $want | wc -w); jobs=${SB_JOBS:-4}; [ "$jobs" -gt "$n" ] && jobs=$n
+  # the lowest priority: on Windows "nice -n 19" is the Idle class, and (measured 21.11.2026) Idle starts processes
+  # 2 times faster than "below normal" (nice 5-11); SB_NICE=0: the normal priority
+  NICE=""; [ "$SB_NICE" = 0 ] || ! nice -n 19 true 2>/dev/null || NICE="nice -n 19"
+  RUN=$(mktemp -d "${TMPDIR:-/tmp}/sb-tests.XXXXXX"); start=$(date +%s)
+  # a script per group: the start of this file (the helpers), the group's sections, the end (the result)
+  awk -v dir="$RUN" -v want=" $(echo $want) " '
+    /^# ---------- .* \[[a-z0-9-]*\]$/ { g = $NF; gsub(/[][]/, "", g); part = 1 }
+    /^# ========== the result/ { part = 2 }
+    part == 0 { head = head $0 "\n" } part == 1 { body[g] = body[g] $0 "\n" } part == 2 { tail = tail $0 "\n" }
+    END { for (g in body) if (index(want, " " g " ")) printf "%s%s%s", head, body[g], tail > (dir "/" g ".sh") }' "$T"
+  export SB_T_HERE=$HERE
+  worker() {   # takes the next group nobody took yet (mkdir is atomic), runs it, says how it went
+    for g in $want; do
+      mkdir "$RUN/$g.taken" 2>/dev/null || continue
+      mkdir -p "$RUN/$g.tmp"; s=$(date +%s)
+      TMPDIR=$RUN/$g.tmp SB_T_GROUP=$g $NICE "$SH" "$RUN/$g.sh" > "$RUN/$g.log" 2>&1; rc=$?
+      set -- $(sed -n 's/^Тесты: прошло \([0-9]*\), не прошло \([0-9]*\).*/\1 \2/p' "$RUN/$g.log")
+      grep '^  FAIL' "$RUN/$g.log"
+      [ $# = 2 ] || { echo "  FAIL: группа $g оборвалась (код $rc):"; tail -n 5 "$RUN/$g.log"; set -- 0 1; }
+      echo "$1 $2" > "$RUN/$g.sum"
+      printf '%-10s прошло %4s, не прошло %s  (%s с)\n' "$g" "$1" "$2" "$(( $(date +%s) - s ))"
+    done
+  }
+  i=0; while [ $i -lt "$jobs" ]; do worker & i=$((i + 1)); done; wait
+  P=0; F=0
+  for g in $want; do read p f < "$RUN/$g.sum"; P=$((P + p)); F=$((F + f)); done
+  echo ""
+  echo "Тесты: прошло $P, не прошло $F  (оболочка: $SH; групп $n, одновременно $jobs; $(( $(date +%s) - start )) с)"
+  if [ "$F" = 0 ]; then rm -rf "$RUN"; else echo "Журналы групп (ГРУППА.log) и файлы упавших проверок: $RUN"; fi
+  [ "$F" = 0 ]; exit
+fi
+# ---- the checks: a group's script starts here (SB_T_GROUP is its name) ----
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/sb-tests.XXXXXX")
+SB_TMP=$WORK/tmp; mkdir -p "$SB_TMP"; export SB_TMP   # instead of /tmp in lib/vsub.sh, lib/wireguard.sh
 PASS=0; FAILED=0
 TOKEN=123456789:AAFakeTokenForTestsOnly_abcdefghijklmnop
 export SB_WG_TRIES=1           # the WireGuard traffic check waits 5 s per try: one try in tests
+export SB_T_HOLD=0             # the AI reserve's anti-flap delays: off, except in the checks made for them
+export SB_T_NAP=1              # the pauses between the reserve's tries: none (the same tries in the same order)
 
 check() {   # check "description" COMMAND...
   d=$1; shift
@@ -21,18 +83,31 @@ hasnt()   { ! grep -qF -- "$3" "$2" 2>/dev/null; }
 exists()  { [ -e "$2" ]; }
 missing() { [ ! -e "$2" ]; }
 equal()   { [ "$2" = "$3" ]; }
+differ()  { [ "$2" != "$3" ]; }
 
-keenetic() { CASE=$1; K=$WORK/$1; mkdir -p "$K"; sh "$HERE/fake-keenetic.sh" "$K" >/dev/null; }
+# a fresh fake router for each case: a copy of the one built once per run (one process instead of ~40)
+keenetic() {
+  CASE=$1; K=$WORK/$1; [ -d "$WORK/.keenetic" ] || sh "$HERE/fake-keenetic.sh" "$WORK/.keenetic" >/dev/null
+  rm -rf "$K"; cp -r "$WORK/.keenetic" "$K"
+}
 sb_k() {    # run install.sh against the fake Keenetic $K; output in $K/out, exit code in $RC
   SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$SRC/install.sh" "$@" > "$K/out" 2>&1; RC=$?
 }
-openwrt() { CASE=$1; R=$WORK/$1; mkdir -p "$R"; sh "$HERE/fake-openwrt.sh" "$R" >/dev/null; }
+openwrt() {
+  CASE=$1; R=$WORK/$1; [ -d "$WORK/.openwrt" ] || sh "$HERE/fake-openwrt.sh" "$WORK/.openwrt" >/dev/null
+  rm -rf "$R"; cp -r "$WORK/.openwrt" "$R"
+}
 sb_o() {
   SB_ROOT=$R SB_OPT=$R SB_TEST=1 SB_PLATFORM=openwrt "$SH" "$SRC/install.sh" "$@" > "$R/out" 2>&1; RC=$?
 }
 ev_count() { grep -c "^@@sb	$2" "$1"; }    # ev_count FILE EVENT
+# shared by several groups: a made-up WireGuard key; bot messages (getUpdates) and one run of the bot
+PRIV=aFakePrivateKeyForTestsOnly0123456789abcdE=
+botmsg() { n=0; out='{"ok":true,"result":['; for m; do n=$((n+1)); [ $n -gt 1 ] && out="$out,"; out="$out{\"update_id\":$((100+n)),\"message\":{\"chat\":{\"id\":-100},\"text\":\"$m\"}}"; done; printf '%s]}\n' "$out" > "$K/updates"; }
+bot1() { : > "$K/curl.log"; SB_OPT=$K SB_BOT_ONCE=1 SB_TEST=1 SB_PLATFORM=keenetic SB_MEMINFO="$K/meminfo-ok" "$SH" "$K/etc/cron.1min/sb-bot" > /dev/null 2>&1; }
+botdoc() { printf '{"ok":true,"result":[{"update_id":301,"message":{"chat":{"id":-100},"document":{"file_name":"%s","mime_type":"x","thumbnail":{"file_id":"THUMB","file_unique_id":"T1","width":90},"file_id":"F1","file_unique_id":"U1","file_size":300}}}]}\n' "$1" > "$K/updates"; }
 
-# ---------- doctor with progress events ----------
+# ---------- doctor with progress events ---------- [install]
 keenetic doctor
 sb_k doctor --progress
 check "doctor event"           has x "$K/out" "@@sb	doctor	"
@@ -41,7 +116,7 @@ check "items as events"        has x "$K/out" "@@sb	item	ok	"
 check "no colour codes"        hasnt x "$K/out" "$(printf '\033')"
 check "auto-update noted"      has x "$K/out" "включено автообновление KeeneticOS"
 
-# ---------- answers file: bad input is refused before anything happens ----------
+# ---------- answers file: bad input is refused before anything happens ---------- [install]
 keenetic badkey
 printf 'profle=full\n' > "$K/a"; sb_k install --answers "$K/a"
 check "unknown key -> exit 2"  equal x "$RC" 2
@@ -50,7 +125,7 @@ printf 'just-a-token-pasted\n' > "$K/a"; sb_k install --answers "$K/a"
 check "line without = -> 2"    equal x "$RC" 2
 check "value not echoed"       hasnt x "$K/out" "just-a-token-pasted"
 
-# ---------- dry run with answers: nothing changes ----------
+# ---------- dry run with answers: nothing changes ---------- [install]
 keenetic dry
 cp "$K/etc/nfqws2/nfqws2.conf" "$K/conf.before"
 cat > "$K/a" <<EOF
@@ -70,7 +145,7 @@ check "no state file"          missing x "$K/etc/switchback/state"
 check "only show commands"     equal x "$(grep -v ' show ' "$K/ndmc.log" | wc -l | tr -d ' ')" 0
 check "token not printed"      hasnt x "$K/out" "$TOKEN"
 
-# ---------- real install from stdin answers, then uninstall ----------
+# ---------- real install from stdin answers, then uninstall ---------- [install]
 keenetic full
 printf 'src/gz entware http://bin.entware.net/mipselsf-k3.4\n' > "$K/etc/opkg.conf"
 cp "$K/etc/nfqws2/nfqws2.conf" "$K/conf.before"
@@ -101,7 +176,7 @@ check "not the form KeeneticOS refuses" hasnt x "$K/ndmc.log" "no dns-proxy tls 
 check "bot.conf removed"       missing x "$K/etc/watchdog/bot.conf"
 check "state archived"         missing x "$K/etc/switchback/state"
 
-# ---------- KeeneticOS removes a DoT server with all its domains: the others are put back (real router, 2026-11-11) ----------
+# ---------- KeeneticOS removes a DoT server with all its domains: the others are put back (real router, 2026-11-11) ---------- [dns]
 keenetic dnsdel
 printf 'profile=custom\nmodules=dns\ndns_claude=y\ndns_claude_ip=5.6.7.8\ndns_claude_sni=dns.claude.example\n' > "$K/a"
 sb_k install --answers "$K/a"
@@ -118,7 +193,7 @@ check "our domains stay removed" hasnt x "$K/after-last" "domain claude"
 check "our last one too"       hasnt x "$K/after-last" "domain anthropic.com"
 check "other server untouched" hasnt x "$K/ndmc.log" "no dns-proxy tls upstream 1.2.3.4"
 
-# ---------- another DNS service for a domain that already has one: replaced, not skipped ----------
+# ---------- another DNS service for a domain that already has one: replaced, not skipped ---------- [dns]
 # (the fake router already has "1.2.3.4 dns.example" for chatgpt.com)
 keenetic dnsswap
 printf 'profile=custom\nmodules=dns\ndns_chatgpt=y\ndns_chatgpt_ip=5.6.7.8\ndns_chatgpt_sni=new.example\n' > "$K/a"
@@ -162,7 +237,7 @@ check "old address gone"       hasnt x "$R/uci.db" "one.example"
 check "DoH proxy restarted"    has x "$R/svc.log" "https-dns-proxy stop"
 check "domains left as they are" has x "$R/out" "chatgpt.com уже настроен"
 
-# ---------- the router's own connections go past zapret (kernel memory leak, real Keenetic 2026-11-11) ----------
+# ---------- the router's own connections go past zapret (kernel memory leak, real Keenetic 2026-11-11) ---------- [zapret]
 # a fake iptables only (SB_IPT): "-S" prints zapret's rules and what was added, "-I"/"-D" are written down
 keenetic own
 cat > "$K/ipt" <<'EOF'
@@ -202,7 +277,7 @@ IPT_DIR=$K SB_IPT="sh $K/ipt" SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$S
 check "uninstall exit 0"       equal x "$RC" 0
 check "hook removed"           missing x "$OWN"
 check "rule removed"           equal x "$(cat "$K/deleted" 2>/dev/null)" "$OWNRULE"
-# ---------- devices at home do not use QUIC (the YouTube app on a TV, real Keenetic 2026-11-15) ----------
+# ---------- devices at home do not use QUIC (the YouTube app on a TV, real Keenetic 2026-11-15) ---------- [zapret]
 keenetic noquic
 cp "$WORK/own/ipt" "$K/ipt"; cp "$WORK/own/rules" "$K/rules"
 QH=$K/etc/ndm/netfilter.d/102-switchback-noquic.sh
@@ -228,7 +303,7 @@ check "tune goes through zapret"   has x "$SRC/lib/tune.sh" 'curl $ZCURL'
 check "bot /check through zapret"  has x "$SRC/lib/bot.sh" 'curl --local-port 61000-61099'
 check "node checks past zapret"    hasnt x "$SRC/lib/nodes.sh" 'local-port'
 
-# ---------- answers without bot token: watchdog skipped, not a failure ----------
+# ---------- answers without bot token: watchdog skipped, not a failure ---------- [install]
 keenetic notoken
 printf 'profile=custom\nmodules=watchdog\n' > "$K/a"
 sb_k install --answers "$K/a"
@@ -236,7 +311,7 @@ check "exit 0"                 equal x "$RC" 0
 check "explains the skip"      has x "$K/out" "нет ни токена бота"
 check "no watchdog installed"  missing x "$K/etc/cron.5mins/watchdog"
 
-# ---------- found on the real Keenetic (2026-11-07) ----------
+# ---------- found on the real Keenetic (2026-11-07) ---------- [install]
 # answers from standard input are really used; a network already routed through another
 # connection is left alone; the default connection is the one Telegram already uses
 keenetic real-1
@@ -252,7 +327,7 @@ check "alive tunnel shown"     has x "$K/out" "Wireguard0: подключено,
 check "vpn event with state"   has x "$K/out" "@@sb	vpn	Wireguard0	up"
 check "telegram route found"   has x "$K/out" "@@sb	tgvia	Wireguard0"
 
-# ---------- failover: the module installs it; the script switches, and handles the edge cases ----------
+# ---------- failover: the module installs it; the script switches, and handles the edge cases ---------- [failover]
 keenetic failover
 printf 'profile=custom\nmodules=failover\nfailover_tunnels=Wireguard0 Wireguard9 Wireguard1\n' > "$K/a"
 sb_k install --answers "$K/a"
@@ -378,7 +453,7 @@ SB_ROOT=$R "$R/bin/uci" del_list "dhcp.@dnsmasq[0].address=/claude.ai/10.0.0.1"
 printf 'uninstall_confirm=y\n' > "$R/u"; sb_o uninstall --answers "$R/u"
 check "openwrt: uci back to original" equal x "$(sort "$R/uci.db.seed")" "$(sort "$R/uci.db")"
 
-# ---------- Claude nodes (Keenetic): QUIC rules, pin to the fastest node, the switch script ----------
+# ---------- Claude nodes (Keenetic): QUIC rules, pin to the fastest node, the switch script ---------- [nodes]
 keenetic nodes
 printf '10.0.0.1\n10.0.0.2\n10.0.0.3\n' > "$K/nodes"
 echo 400 > "$K/node-ms-10.0.0.1"; echo 90 > "$K/node-ms-10.0.0.2"; touch "$K/node-dead-10.0.0.3"
@@ -430,6 +505,10 @@ check "ai holds Claude: nodes pin nothing" hasnt x "$K/ndmc.log" "ip host"
 check "ai holds Claude: logged"   has x "$K/var/claude-nodes/log" "the AI reserve holds it (zdns)"
 nd --pin web best
 check "ai holds Claude: /node refuses" has x "$K/nd.out" "путь выбирает резерв для нейросетей"
+# the reserve is switching (its lock; "cur" changes only at the end): a scan then re-pinned over it (19.11.2026)
+echo dns > "$K/var/ai-path/cur.claude"; mkdir "$K/var/ai-path/busy"; : > "$K/ndmc.log"; nd
+check "ai switching: nodes pin nothing" hasnt x "$K/ndmc.log" "ip host"
+check "ai switching: logged"      has x "$K/var/claude-nodes/log" "the AI reserve holds it (switching)"
 rm -rf "$K/etc/switchback/ai.conf" "$K/var/ai-path"
 # the only fast node's rule is switched off -> not used, nothing better -> pause before the next scan
 sed -i 's/^    deny udp 0.0.0.0 0.0.0.0 10.0.0.2 255.255.255.255 port eq 443$/&\n    deny disable/' "$K/rc.extra"
@@ -469,6 +548,18 @@ rm -f "$K/var/claude-nodes/"*.last_scan "$K/var/claude-nodes/"*.bad; : > "$K/ndm
 check "reserve node used"      has x "$K/ndmc.log" "ip host claude.ai 10.0.0.9"
 nd --dry
 check "dry run shows reserve"  has x "$K/nd.out" "reserve nodes (no QUIC rule needed): 10.0.0.9"
+# a dead node: every other pin on it goes too (pinned by hand: 18.11.2026 eight names were left on a dead node);
+# a name the AI reserve holds keeps its pin, its "before" value in the reserve's journal changes
+printf 'ip host cdn.auth0.com 10.0.0.1\nip host sora.com 10.0.0.1\n' >> "$K/rc.extra"
+mkdir -p "$K/var/ai-path"; echo 'sora.com 10.0.0.1' > "$K/var/ai-path/pinned"; touch "$K/node-dead-10.0.0.1"
+rm -f "$K/var/claude-nodes/"*.last_scan "$K/var/claude-nodes/"*.bad; : > "$K/ndmc.log"; nd
+check "dead node: group moved"  has x "$K/ndmc.log" "ip host claude.ai 10.0.0.9"
+check "dead node: pins by hand too" has x "$K/ndmc.log" "ip host cdn.auth0.com 10.0.0.9"
+check "dead node: the reserve's name left" hasnt x "$K/ndmc.log" "ip host sora.com"
+check "dead node: the reserve's before value" has x "$K/var/ai-path/pinned" "sora.com 10.0.0.9"
+check "dead node: logged"       has x "$K/var/claude-nodes/log" "other pins moved: 1"
+sed -i '/^ip host cdn.auth0.com /d; /^ip host sora.com /d' "$K/rc.extra"; rm -rf "$K/var/ai-path" "$K/node-dead-10.0.0.1"
+rm -f "$K/var/claude-nodes/"*.last_scan "$K/var/claude-nodes/"*.bad
 # for the bot: the list with times, pinning by hand (only known, live nodes)
 nd --list
 check "list: reserve node"     has x "$K/nd.out" "10.0.0.9 50 reserve"
@@ -499,7 +590,7 @@ keenetic nodes-one
 printf '10.0.0.1\n' > "$K/nodes"; printf 'profile=custom\nmodules=nodes\n' > "$K/a"; sb_k install --answers "$K/a"
 check "one node: skipped"      has x "$K/out" "переключать не между чем"
 
-# ---------- report: useful parts in, every secret out ----------
+# ---------- report: useful parts in, every secret out ---------- [report]
 keenetic report
 cat > "$K/rc.extra" <<'EOF'
 interface Wireguard0
@@ -544,13 +635,13 @@ check "openwrt report exit 0"  equal x "$RC" 0
 check "openwrt: tunnels shown" has x "$R/out" "network.wg0.proto='wireguard'"
 check "openwrt: no key"        hasnt x "$R/out" "aFakePrivateKeyForTestsOnly"
 
-# ---------- custom modules keep the safe order ----------
+# ---------- custom modules keep the safe order ---------- [install]
 keenetic order
 printf 'profile=custom\nmodules=vpn https\nvpn_iface=Wireguard0\n' > "$K/a"
 sb_k install --dry-run --progress --answers "$K/a"
 check "order https, vpn"       has x "$K/out" "@@sb	plan	https	vpn"
 
-# ---------- failure in the middle rolls back this run ----------
+# ---------- failure in the middle rolls back this run ---------- [install]
 keenetic fail
 cp "$K/etc/nfqws2/nfqws2.conf" "$K/conf.before"
 printf 'profile=full\ndns_claude=y\ndns_claude_ip=9.9.9.9\ndns_claude_sni=bad.example\nvpn_iface=Wireguard0\n' > "$K/a"
@@ -561,7 +652,7 @@ check "end 1"                  has x "$K/out" "@@sb	end	1"
 check "zapret conf rolled back" equal x "$(cat "$K/conf.before")" "$(cat "$K/etc/nfqws2/nfqws2.conf")"
 check "no Telegram routes"     hasnt x "$K/ndmc.log" "ip route 91.108.4.0"
 
-# ---------- OpenWrt: install with answers, uninstall restores uci exactly ----------
+# ---------- OpenWrt: install with answers, uninstall restores uci exactly ---------- [openwrt]
 openwrt owrt
 cat > "$R/a" <<EOF
 profile=custom
@@ -581,7 +672,7 @@ sb_o uninstall --answers "$R/u"
 check "uninstall exit 0"       equal x "$RC" 0
 check "uci back to original"   equal x "$(sort "$R/uci.db.seed")" "$(sort "$R/uci.db")"
 
-# ---------- OpenWrt in a VM (2026-11-17): uninstall leaves the router as it was before us ----------
+# ---------- OpenWrt in a VM (2026-11-17): uninstall leaves the router as it was before us ---------- [openwrt]
 openwrt owclean
 echo ca-certificates > "$R/pkgs.db"            # on the router before us: must stay
 rm -f "$R/etc/crontabs/root"                   # a fresh OpenWrt has no crontab
@@ -678,7 +769,7 @@ n2=$(PATH="$R/nood:$PATH" "$SH" -c ". '$SRC/lib/common.sh'; . '$SRC/lib/modules.
 check "no od: long name"       equal x "${#n2}" 43
 check "two names differ"       "$SH" -c "[ '$n1' != '$n2' ]"
 
-# ---------- OpenWrt firmware upgrade: our files kept, lost packages found and reinstalled ----------
+# ---------- OpenWrt firmware upgrade: our files kept, lost packages found and reinstalled ---------- [openwrt]
 openwrt upgrade
 printf '/etc/my-own-file\n' > "$R/etc/sysupgrade.conf"
 cat > "$R/a" <<EOF
@@ -713,14 +804,13 @@ printf 'uninstall_confirm=y\nuninstall_packages=y\n' > "$R/u"
 sb_o uninstall --answers "$R/u"
 check "sysupgrade.conf restored" equal x "$(cat "$R/etc/sysupgrade.conf")" "/etc/my-own-file"
 
-# ---------- status on a router where nothing was installed ----------
+# ---------- status on a router where nothing was installed ---------- [install]
 keenetic status-empty
 sb_k status --progress
 check "nothing installed yet"  has x "$K/out" "ещё ничего не ставил"
 check "neutral status event"   has x "$K/out" "@@sb	status	none"
 
-# ---------- WireGuard from a .conf: keys never shown, logged or journaled ----------
-PRIV=aFakePrivateKeyForTestsOnly0123456789abcdE=
+# ---------- WireGuard from a .conf: keys never shown, logged or journaled ---------- [wireguard]
 PSK=aFakePresharedKeyForTestsOnly0123456789abc=
 wgconf() {
   printf '[Interface]\r\nPrivateKey = %s\r\nAddress = 10.8.0.2/32, fd00::2/128\r\nDNS = 1.1.1.1\r\n\r\n[Peer]\r\nPublicKey = SERVERpubKEYforTESTSonly0123456789abcdefgh=\r\nPresharedKey = %s\r\nEndpoint = 198.51.100.7:51820\r\nAllowedIPs = 0.0.0.0/0, ::/0\r\nPersistentKeepalive = 25\r\n' "$PRIV" "$PSK" > "$1"
@@ -776,7 +866,7 @@ sb_k wg-import --conf "$K/bad.conf"
 check "no PrivateKey -> exit 2" equal x "$RC" 2
 check "explains"               has x "$K/out" "нет PrivateKey"
 
-# ---------- many servers at once (wg-batch): checked one by one, working ones kept as standbys ----------
+# ---------- many servers at once (wg-batch): checked one by one, working ones kept as standbys ---------- [wireguard]
 wgconf2() {   # wgconf2 FILE HOST
   printf '[Interface]\nPrivateKey = %s\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = SERVERpubKEYforTESTSonly0123456789abcdefgh=\nEndpoint = %s:51820\n' "$PRIV" "$2" > "$1"
 }
@@ -804,7 +894,7 @@ check "batch: removed forgotten" hasnt x "$K/state.copy" "wg Wireguard3"
 check "batch: into failover"     has x "$K/etc/switchback/failover.conf" 'TUNNELS="Wireguard0 Wireguard1 Wireguard2"'
 check "batch: saved"             has x "$K/ndmc.log" "system configuration save"
 check "batch: files wiped"       missing x "$K/wgb"
-check "batch: no unpacked copy"  equal x "$(ls -d /tmp/switchback-wgb.* 2>/dev/null | wc -l | tr -d ' ')" 0
+check "batch: no unpacked copy"  equal x "$(ls -d "$SB_TMP"/switchback-wgb.* 2>/dev/null | wc -l | tr -d ' ')" 0
 check "batch: done event"        has x "$K/out" "@@sb	wg_batch	done	5	1	2	1	1"
 check "batch: in turns, all read" has x "$K/out" "проверено 5 из 5"
 secrets_hidden "$K" "$K/out"
@@ -818,6 +908,33 @@ check "keep: rest not checked"   has x "$K/out" "остальные 1 не пр�
 check "keep: own files stay"     exists x "$K/wgb/a.conf"
 sb_k wg-batch --conf "$K/nothing-here"
 check "batch: missing -> exit 2" equal x "$RC" 2
+# servers already on the router (seen 2026-11-18: 320 of 351): a dead one is checked anew - .31 comes back (and
+# back into the failover list), .32 stays dead and is not removed; a live one (.33) and a standby that answered
+# the daily check and is only switched off (.34) are skipped as before
+keenetic wgb-dead
+mkdir -p "$K/wgb" "$K/var/wg-failover" "$K/etc/switchback"
+for x in 31 32 33 34; do wgconf2 "$K/wgb/$x.conf" 203.0.113.$x; done
+wgconf2 "$K/wgb/dup.conf" 203.0.113.32
+n=4; for x in 31 32 33 34; do
+  printf 'interface Wireguard%s\n    description switchback-203.0.113.%s\n    wireguard peer SERVERpub\n        endpoint 203.0.113.%s:51820\n!\n' "$n" "$x" "$x"; n=$((n+1))
+done > "$K/rc.extra"
+touch "$K/wg-revive-Wireguard4" "$K/wg-alive-Wireguard6"
+printf 'date 2026-11-18 05:00\nlive Wireguard7\ndead Wireguard5\n' > "$K/var/wg-failover/standby"
+printf 'TUNNELS="Wireguard0 Wireguard1 Wireguard5 Wireguard7"\n' > "$K/etc/switchback/failover.conf"
+sb_k wg-batch --conf "$K/wgb" --progress
+check "recheck: exit 0"            equal x "$RC" 0
+check "recheck: revived"           has x "$K/out" "Wireguard4 (203.0.113.31) — был мёртв, снова работает"
+check "recheck: back off"          has x "$K/ndmc.log" "interface Wireguard4 down"
+check "recheck: back in failover"  has x "$K/etc/switchback/failover.conf" 'TUNNELS="Wireguard0 Wireguard1 Wireguard5 Wireguard7 Wireguard4"'
+check "recheck: still dead said"   has x "$K/out" "Wireguard5 (203.0.113.32) — уже на роутере и по-прежнему не отвечает"
+check "recheck: dead not removed"  hasnt x "$K/ndmc.log" "no interface Wireguard5"
+check "recheck: live one skipped"  hasnt x "$K/ndmc.log" "interface Wireguard6 up"
+check "recheck: standby skipped"   hasnt x "$K/ndmc.log" "interface Wireguard7 up"
+check "recheck: nothing created"   hasnt x "$K/ndmc.log" "description switchback-"
+check "recheck: totals"            has x "$K/out" "повторы 3, не разобрать 0; перепроверено мёртвых 2, ожило 1"
+check "recheck: done event"        has x "$K/out" "@@sb	wg_batch	done	5	0	0	3	0	2	1"
+check "recheck: no 'none found'"   hasnt x "$K/out" "рабочих не нашлось"
+check "recheck: logged"            has x "$K/var/log/switchback.log" "dead ones rechecked 2, revived 1: Wireguard4"
 unset SB_WG_SLEEP
 
 openwrt wg-owrt
@@ -834,7 +951,7 @@ check "analysis now sees it"   has x "$(SB_ROOT=$R SB_OPT=$R SB_TEST=1 SB_PLATFO
 printf 'uninstall_confirm=y\nuninstall_packages=y\n' > "$R/u"; sb_o uninstall --answers "$R/u"
 check "uci back to original"   equal x "$(sort "$R/uci.db.seed")" "$(sort "$R/uci.db")"
 
-# ---------- 0.6: own copy on the router, bot commands, own sites, update, zapret tuning ----------
+# ---------- 0.6: own copy on the router, bot commands, own sites, update, zapret tuning ---------- [bot]
 keenetic v06
 printf 'profile=custom\nmodules=zapret vpn watchdog\nvpn_iface=Wireguard0\nbot_token=%s\nbot_chat=-100\n' "$TOKEN" > "$K/a"
 sb_k install --answers "$K/a"
@@ -1148,7 +1265,6 @@ check "sites answered"         has x "$K/curl.log" "example.org"
 # actions: list, ask, "да" (sent as escapes, put together here), done; a stale "yes" does nothing
 YES="${B}u0434${B}u0430"
 printf '10.3.3.3\n' > "$K/dns-viabot.example"
-botmsg() { n=0; out='{"ok":true,"result":['; for m; do n=$((n+1)); [ $n -gt 1 ] && out="$out,"; out="$out{\"update_id\":$((100+n)),\"message\":{\"chat\":{\"id\":-100},\"text\":\"$m\"}}"; done; printf '%s]}\n' "$out" > "$K/updates"; }
 rm -f "$K/var/sb-bot/offset"
 botmsg "/tunnel" "/site add viabot.example vpn" "$YES" "/restart zapret" "yes" "/node"
 : > "$K/curl.log"; SB_OPT=$K SB_BOT_ONCE=1 SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$K/etc/cron.1min/sb-bot" > /dev/null 2>&1
@@ -1204,7 +1320,6 @@ botmsg "/check"
 check "bot: check own site"    has x "$K/curl.log" "https://viabot2.example"
 check "bot: no «video» site"   hasnt x "$K/curl.log" "https://video"
 # «Что-то не работает»: all fine; YouTube down -> the tune button; no internet at all -> the provider
-bot1() { : > "$K/curl.log"; SB_OPT=$K SB_BOT_ONCE=1 SB_TEST=1 SB_PLATFORM=keenetic SB_MEMINFO="$K/meminfo-ok" "$SH" "$K/etc/cron.1min/sb-bot" > /dev/null 2>&1; }
 printf 'MemTotal: 100000 kB\nMemAvailable: 50000 kB\n' > "$K/meminfo-ok"
 DIAG="${B}u0427${B}u0442${B}u043e-${B}u0442${B}u043e ${B}u043d${B}u0435 ${B}u0440${B}u0430${B}u0431${B}u043e${B}u0442${B}u0430${B}u0435${B}u0442"
 botmsg "$DIAG"; bot1
@@ -1254,7 +1369,6 @@ check "quic: undo button"      has x "$K/curl.log" '"callback_data":"quic undo"'
 botmsg "/quic undo" "yes"; bot1
 check "quic: undone"           has x "$K/etc/nfqws2/nfqws2.conf" "quic_initial:ip_autottl=-2,3-20:repeats=10"
 # servers sent as files: kept until «Проверить и добавить», then checked on their own, the files wiped
-botdoc() { printf '{"ok":true,"result":[{"update_id":301,"message":{"chat":{"id":-100},"document":{"file_name":"%s","mime_type":"x","thumbnail":{"file_id":"THUMB","file_unique_id":"T1","width":90},"file_id":"F1","file_unique_id":"U1","file_size":300}}}]}\n' "$1" > "$K/updates"; }
 printf '[Interface]\nPrivateKey = %s\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = SERVERpubKEYforTESTSonly0123456789abcdefgh=\nEndpoint = 203.0.113.51:51820\n' "$PRIV" > "$K/tg-file"
 botdoc "photo.jpg"; bot1
 check "file: other kind refused" has x "$K/curl.log" "Этот файл мне не подходит"
@@ -1582,7 +1696,7 @@ check "owrt: sites kept"       has x "$R/etc/sysupgrade.conf" "/etc/switchback/s
 sb_o sites del blocked.example
 check "owrt: route removed"    has x "$R/uci.log" "uci -q delete network.sb_tg_10_2_2_2"
 
-# ---------- lists/: the values come from the files and are the same as the ones written in the code before ----------
+# ---------- lists/: the values come from the files and are the same as the ones written in the code before ---------- [lists]
 CASE=lists
 lv() { "$SH" -c ". '$SRC/lib/common.sh'; lists_load '$1' && eval \"printf %s \\\"\$$2\\\"\""; }
 check "lists: TG_NETS as before" equal x "$(lv "$SRC/lists" TG_NETS)" "91.108.56.0/255.255.252.0 91.108.4.0/255.255.252.0 91.108.8.0/255.255.252.0 91.108.16.0/255.255.252.0 91.108.12.0/255.255.252.0 149.154.160.0/255.255.240.0 91.105.192.0/255.255.254.0 91.108.20.0/255.255.252.0 185.76.151.0/255.255.255.0"
@@ -1635,7 +1749,7 @@ check "lists: empty file stops"     equal x "$RC" 1
 check "lists: empty file named"     has x "$K/out" "Пустой список lists/google.nets"
 
 
-# ---------- the site doctor: sites doctor DOMAIN ----------
+# ---------- the site doctor: sites doctor DOMAIN ---------- [sites]
 keenetic doctorsite
 sb_k sites doctor https://Example.COM/page --progress
 check "doctor: opens -> device"     has x "$K/out" "example.com открывается с роутера"
@@ -1661,7 +1775,7 @@ sb_k sites doctor 'a;reboot' --progress
 check "doctor: odd input refused"   equal x "$RC" 1
 check "doctor: says why"            has x "$K/out" "не похоже на адрес сайта"
 
-# ---------- the panel: on, its program (login, CSRF, input), next tunnel, off, uninstall ----------
+# ---------- the panel: on, its program (login, CSRF, input), next tunnel, off, uninstall ---------- [panel]
 keenetic panel
 export SB_LAN_IP=192.168.1.1
 sb_k panel on
@@ -1756,7 +1870,7 @@ check "module: panel step"          has x "$K/out" "@@sb	step	1	1	panel"
 check "module: panel on"            exists x "$K/etc/switchback/panel/www/cgi-bin/sb"
 unset SB_LAN_IP
 
-# ---------- the AI reserve (lib/ai.sh): DNS service -> Zapret DNS -> spare proxies -> VPN ----------
+# ---------- the AI reserve (lib/ai.sh): DNS service -> Zapret DNS -> spare proxies -> VPN ---------- [ai]
 keenetic ai
 echo 161.104.89.59 > "$K/zdns-ip"; touch "$K/zdns-cname"; echo 160.79.104.10 > "$K/vpn-ip"
 echo 10.0.0.5 > "$K/dns-claude.ai"; echo 10.0.0.6 > "$K/dns-chatgpt.com"   # the DoT service's nodes
@@ -1767,6 +1881,7 @@ cat > "$K/bin/ip" <<'EOF'
 #!/bin/sh
 case "$*" in "route get "*)
   if [ -f "$SB_OPT/route-missing" ]; then echo "$3 via 1.1.1.254 dev eth2.2"; else echo "$3 dev nwg0 src 10.8.0.2"; fi ;;
+"-4 addr show dev nwg0") [ -f "$SB_OPT/ip-src" ] && echo "    inet 10.8.0.2/32 scope global nwg0" ;;   # ai_bind
 esac
 EOF
 chmod +x "$K/bin/ip"
@@ -1780,7 +1895,7 @@ ai_reserve=y
 EOF
 sb_k install --answers "$K/a"
 AI=$K/var/ai-path; J=$K/etc/cron.1min/ai-path
-NC=$(grep -vc '^#' "$SRC/lists/ai-claude.domains")
+NC=$(( $(grep -vc '^#' "$SRC/lists/ai-claude.domains") - 1 ))   # claude.com stays the DNS service's (ai_svc_probe)
 check "ai: exit 0"                  equal x "$RC" 0
 check "ai: job installed"           exists x "$J"
 check "ai: no placeholders"         hasnt x "$J" "__"
@@ -1794,6 +1909,11 @@ aj() { SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$J" > "$K/aj.out" 2>&1; }
 date +%s > "$AI/refresh"; date +%s > "$AI/back"
 : > "$K/ndmc.log"; aj
 check "ai: alive: nothing done"     hasnt x "$K/ndmc.log" "ip host"
+# a slow node: the answer at once, the whole page too late (20.11.2026): the job judges by the answer
+touch "$K/node-slowbody-10.0.0.5"; aj; aj
+check "ai: slow node: still alive"  missing x "$AI/bad.claude"
+check "ai: slow node: headers only" has x "$K/curl.log" "curl -s -I -o /dev/null --connect-timeout 4 --max-time 8"
+rm -f "$K/node-slowbody-10.0.0.5"
 # GeoHide dies: two dead runs, then Zapret DNS
 touch "$K/node-dead-10.0.0.5"; aj
 check "ai: one dead run: waits"     equal x "$(cat "$AI/bad.claude")" 1
@@ -1801,7 +1921,9 @@ check "ai: one dead run: waits"     equal x "$(cat "$AI/bad.claude")" 1
 check "ai: Claude moved to Zapret DNS" equal x "$(cat "$AI/cur.claude")" zdns
 check "ai: Claude pinned"           has x "$K/ndmc.log" "ip host claude.ai 161.104.89.59"
 check "ai: every Claude name"       equal x "$(grep -c '^ndmc -c ip host .* 161.104.89.59$' "$K/ndmc.log")" "$NC"
+export SB_T_AI_FEW=1            # from here a switch pins a few names: ~100 pins are 20-40 s of processes on Windows
 check "ai: ChatGPT left alone"      hasnt x "$K/ndmc.log" "ip host chatgpt.com"
+check "ai: the service's probe name not pinned" hasnt x "$K/ndmc.log" "ip host claude.com "
 check "ai: asked through zapret"    has x "$K/curl.log" 'local-port = "61000-61099"'
 check "ai: stops at the first failure" has x "$K/curl.log" "fail-early"
 check "ai: told the bot"            has x "$K/curl.log" "sendMessage"
@@ -1829,12 +1951,12 @@ check "ai: route problem logged"    has x "$K/var/log/switchback.log" "не вс
 : > "$K/curl.log"; aj
 check "ai: alarm not repeated at once" hasnt x "$K/curl.log" "sendMessage"
 # the route gets in: VPN
-touch "$K/vpn-none-claude.com"      # a name without an answer: the names after it keep their own answers
+touch "$K/vpn-none-api.anthropic.com"   # a name without an answer: the names after it keep their own answers
 rm -f "$K/route-missing"; : > "$K/ndmc.log"; : > "$K/curl.log"; aj
-check "ai: no answer, no pin"       hasnt x "$K/ndmc.log" "ip host claude.com 160.79.104.10"
-check "ai: the next name is its own" has x "$K/ndmc.log" "ip host api.anthropic.com 160.79.104.10"
+check "ai: no answer, no pin"       hasnt x "$K/ndmc.log" "ip host api.anthropic.com 160.79.104.10"
+check "ai: the next name is its own" has x "$K/ndmc.log" "ip host a-api.anthropic.com 160.79.104.10"
 check "ai: the last name too"       has x "$K/ndmc.log" "ip host www.claudeusercontent.com 160.79.104.10"
-rm -f "$K/vpn-none-claude.com"
+rm -f "$K/vpn-none-api.anthropic.com"
 check "ai: Claude through VPN"      equal x "$(cat "$AI/cur.claude")" vpn
 check "ai: real address pinned"     has x "$K/ndmc.log" "ip host claude.ai 160.79.104.10"
 check "ai: plain DNS 1.1.1.1 asked"  has x "$K/nslookup.log" "nslookup claude.ai 1.1.1.1"
@@ -1842,13 +1964,24 @@ check "ai: no DoH bound to the tunnel" hasnt x "$K/curl.log" "1.1.1.1/dns-query"
 check "ai: the site checked through the tunnel" has x "$K/curl.log" "--interface nwg0 --resolve claude.ai:443:160.79.104.10"
 check "ai: route kept"              has x "$AI/routes" "claude 160.79.104.10"
 check "ai: back after the alarm"    has x "$K/var/log/switchback.log" "Claude снова открывается"
+# no "ip name-server 1.1.1.1 DOMAIN" for the group's domains any more: on a real Keenetic (20.11.2026) six of them
+# next to Meta's ten killed the router's own DNS; what that version added is taken back
+check "ai subs: none added on vpn"   hasnt x "$K/ndmc.log" "ip name-server 1.1.1.1 claudeusercontent.com"
+printf 'claude claudeusercontent.com
+claude claude.ai
+' > "$AI/subs"
 # by hand: Zapret DNS again (alive again) for 24 h
 rm -f "$K/node-dead-161.104.89.59"; : > "$K/ndmc.log"; sb_k ai via zdns
 check "ai via zdns: exit 0"         equal x "$RC" 0
 check "ai via zdns: Claude"         equal x "$(cat "$AI/cur.claude")" zdns
 check "ai via zdns: VPN route gone" has x "$K/ndmc.log" "no ip route 160.79.104.10"
+check "ai via zdns: subs taken back" has x "$K/ndmc.log" "no ip name-server 1.1.1.1 claudeusercontent.com"
+check "ai via zdns: subs journal clean" hasnt x "$AI/subs" "claude"
 check "ai via zdns: held by hand"   has x "$K/etc/switchback/ai.conf" "MODE=zdns"
 check "ai via zdns: says for how long" has x "$K/out" "вручную на 24 ч"
+printf 'claude anthropic.com\n' > "$AI/subs"; : > "$K/ndmc.log"; sb_k update
+check "ai update: subs taken back"   has x "$K/ndmc.log" "no ip name-server 1.1.1.1 anthropic.com"
+check "ai update: subs journal clean" hasnt x "$AI/subs" "claude"
 # a path that does not work is not taken by hand
 echo 1.2.3.4 > "$K/vpn-ip"; touch "$K/node-dead-1.2.3.4"; sb_k ai via vpn
 check "ai via vpn (dead): refused"  has x "$K/out" "сайт сейчас не открывается"
@@ -1879,6 +2012,67 @@ echo 0.0.0.0 > "$K/zdns-claude.ai"; : > "$K/ndmc.log"; sb_k ai via zdns
 check "ai: 0.0.0.0 is no address"   hasnt x "$K/ndmc.log" "0.0.0.0"
 check "ai: 0.0.0.0: path refused"   has x "$K/out" "сайт сейчас не открывается"
 rm -f "$K/zdns-claude.ai"
+# a reliable check (21.11.2026: VLESS let new connections through now and then: false alarms, needless switches)
+sb_k ai auto; date +%s > "$AI/refresh"; date +%s > "$AI/back"; rm -f "$AI"/bad.* "$AI"/alarm.* "$AI"/fell.*
+P=10.0.0.77; echo $P > "$K/dns-claude.ai"; C0=$(cat "$AI/cur.claude"); echo 1 > "$AI/since.claude"
+echo 2 > "$K/node-miss-$P"; aj
+check "ai check: drop-outs: flaky"    equal x "$(cat "$AI/state.claude")" flaky
+check "ai check: drop-outs: not dead" missing x "$AI/bad.claude"
+check "ai check: drop-outs: logged"   has x "$AI/log" "claude.ai answered, not at once"
+check "ai check: drop-outs: stays"    equal x "$(cat "$AI/cur.claude")" "$C0"
+aj; check "ai check: healthy: ok"     equal x "$(cat "$AI/state.claude")" ok
+echo 3 > "$K/node-miss-$P"; aj
+check "ai check: a whole bad run counts" equal x "$(cat "$AI/bad.claude")" 1
+aj
+check "ai check: no flapping: forgiven" missing x "$AI/bad.claude"
+check "ai check: no flapping: stays"  equal x "$(cat "$AI/cur.claude")" "$C0"
+rm -f "$K/node-miss-$P"
+echo 451 > "$K/node-code-$P"; aj
+check "ai check: 451 is not dead"     missing x "$AI/bad.claude"
+check "ai check: 451 state"           equal x "$(cat "$AI/state.claude")" "geo 451"
+sb_k ai status
+check "ai check: 451 in the status"   has x "$K/out" "отказом по стране"
+echo 403 > "$K/node-code-$P"; aj
+check "ai check: 403 is not dead"     missing x "$AI/bad.claude"
+check "ai check: 403 state"           equal x "$(cat "$AI/state.claude")" "geo 403"
+rm -f "$K/node-code-$P"
+# runs of the job never overlap; the lock is gone after a run
+mkdir "$AI/job"; rm -f "$AI/checked"; aj
+check "ai check: a running job: no second" missing x "$AI/checked"
+rmdir "$AI/job"; aj
+check "ai check: the job ran"         exists x "$AI/checked"
+check "ai check: its lock is gone"    missing x "$AI/job"
+# a real death moves in DEAD_RUNS runs; a path just taken holds one run more
+export SB_T_HOLD=10; touch "$K/node-dead-$P"; echo 1 > "$AI/since.claude"; aj
+check "ai death: first run waits"     equal x "$(cat "$AI/cur.claude")" "$C0"
+aj
+check "ai death: moved at the threshold" differ x "$(cat "$AI/cur.claude")" "$C0"
+check "ai death: the path is remembered" has x "$AI/fell.claude" "$C0 "
+echo "$C0" > "$AI/cur.claude"; date +%s > "$AI/since.claude"; echo 0 > "$AI/bad.claude"; aj; aj
+check "ai hold: just taken: still waits" equal x "$(cat "$AI/cur.claude")" "$C0"
+aj
+check "ai hold: then it moves"        differ x "$(cat "$AI/cur.claude")" "$C0"
+rm -f "$K/node-dead-$P" "$AI/bad.claude"
+# the way back waits for a path that fell; without the hold it comes back
+echo vless > "$AI/cur.claude"; rm -f "$AI/best.claude"; echo "dns $(date +%s)" > "$AI/fell.claude"; echo "zdns $(date +%s)" >> "$AI/fell.claude"
+sb_k ai tick back
+check "ai back: a fallen path waits"  has x "$K/var/log/switchback.log" "fell recently"
+check "ai back: not to the fallen dns" differ x "$(cat "$AI/cur.claude")" dns
+check "ai back: not to the fallen zdns" differ x "$(cat "$AI/cur.claude")" zdns
+export SB_T_HOLD=0; echo vless > "$AI/cur.claude"; rm -f "$AI/best.claude"; sb_k ai tick back
+check "ai back: after the hold: returns" differ x "$(cat "$AI/cur.claude")" vless
+# the owner's choice is not moved by dead runs
+sb_k ai via zdns; touch "$K/node-dead-$P"; aj; aj; aj
+check "ai by hand: stays on a dead path" equal x "$(cat "$AI/cur.claude")" zdns
+rm -f "$K/node-dead-$P" "$AI/bad.claude" "$K/dns-claude.ai"; sb_k ai auto
+# a test by the tunnel skips the redirect into Xray (the real cause of 000 through nwg2, 21.11.2026)
+# by the tunnel's address: the router's curl ignores --local-port together with a device name
+echo 10.0.0.78 > "$K/vpn-ip"; touch "$K/ip-src"; : > "$K/curl.log"; sb_k ai via vpn
+check "ai check: by the tunnel's address, past the redirect" has x "$K/curl.log" "--interface 10.8.0.2 --local-port 61100-61119 --resolve claude.ai:443:10.0.0.78"
+check "ai check: never a device name with the ports" hasnt x "$K/curl.log" "--interface nwg0 --local-port"
+touch "$K/route-missing"; : > "$K/curl.log"; sb_k ai via vpn
+check "ai check: the kernel sends it elsewhere: by the device" has x "$K/curl.log" "--interface nwg0 --resolve claude.ai:443:10.0.0.78"
+rm -f "$K/route-missing" "$K/ip-src" "$K/vpn-ip"; sb_k ai auto
 : > "$K/ndmc.log"; sb_k ai off
 check "ai off: exit 0"              equal x "$RC" 0
 check "ai off: job gone"            missing x "$J"
@@ -1887,6 +2081,103 @@ check "ai off: pins taken back"     has x "$K/ndmc.log" "no ip host claude.ai"
 check "ai off: journal clean"       hasnt x "$K/etc/switchback/state" "ai-path"
 sb_k ai on
 check "ai on again: job"            exists x "$J"
+# the DNS service's node moved while Claude went by VPN (19.11.2026: 161.104.89.59 died, the node auto-switch
+# went on with 2.27.31.124; the test kept asking the dead node and the reserve never came back). An older
+# version's pin of the probe name goes too
+echo vpn > "$AI/cur.claude"; rm -f "$AI/best.claude"; echo 0 > "$AI/back"; touch "$K/node-dead-10.0.0.5"
+printf 'claude.ai 10.0.0.5\nclaudeusercontent.com 10.0.0.5\napi.anthropic.com -\nclaude.com -\n' > "$AI/pinned"
+unset SB_T_AI_FEW               # the whole list comes back: every name, and the journal empties
+echo 10.0.0.7 > "$K/dns-claude.com"; touch "$K/node-slowbody-10.0.0.7"; : > "$K/ndmc.log"; sb_k ai tick back
+check "ai node moved: back on its DNS service" equal x "$(cat "$AI/cur.claude")" dns
+check "ai node moved: the live node"  has x "$K/ndmc.log" "ip host claude.ai 10.0.0.7"
+check "ai node moved: same group"     has x "$K/ndmc.log" "ip host claudeusercontent.com 10.0.0.7"
+check "ai node moved: not the dead one" hasnt x "$K/ndmc.log" "ip host claude.ai 10.0.0.5"
+check "ai node moved: no pin of its own" hasnt x "$K/ndmc.log" "ip host api.anthropic.com 10"
+check "ai node moved: probe name freed" has x "$K/ndmc.log" "no ip host claude.com"
+check "ai node moved: logged"         has x "$K/var/log/switchback.log" "node 10.0.0.5 is dead, back by 10.0.0.7"
+check "ai node moved: journal clean"  hasnt x "$AI/pinned" "claude"
+export SB_T_AI_FEW=1
+# the service gives nothing alive: stays where it is
+echo vpn > "$AI/cur.claude"; rm -f "$AI/best.claude"; echo 0 > "$AI/back"; touch "$K/node-dead-10.0.0.7"
+printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; sb_k ai tick back
+check "ai node dead too: not back on it" equal x "$(grep -cx dns "$AI/cur.claude")" 0
+# the node answers only through our VPN route to it (20.11.2026: 2.27.31.124 by Wireguard25; "dns" takes the route
+# away, the node falls silent, back to vpn every hour): the dns path is asked past the tunnel, by the WAN device
+ai_routed() {
+  echo vpn > "$AI/cur.claude"; rm -f "$AI/best.claude"; echo 0 > "$AI/back"
+  printf 'claude.ai 10.0.0.11
+' > "$AI/pinned"; echo "claude 10.0.0.11 Wireguard0" > "$AI/routes"
+  : > "$K/curl.log"; : > "$K/ndmc.log"; sb_k ai tick back
+}
+touch "$K/node-tunnelonly-10.0.0.11"; export SB_WAN_DEV=ppp0; ai_routed
+check "ai routed node: asked by WAN"    has x "$K/curl.log" "--interface ppp0 --resolve claude.ai:443:10.0.0.11"
+check "ai routed node: not back on dns" equal x "$(grep -cx dns "$AI/cur.claude")" 0
+check "ai routed node: logged"          has x "$K/var/log/switchback.log" "10.0.0.11 (claude.ai) answers only through our VPN route"
+rm -f "$K/node-tunnelonly-10.0.0.11"; ai_routed
+check "ai routed node, direct too: back" equal x "$(cat "$AI/cur.claude")" dns
+check "ai routed node, direct too: route gone" has x "$K/ndmc.log" "no ip route 10.0.0.11"
+unset SB_WAN_DEV; ai_routed
+check "ai routed node, WAN unknown: not back" equal x "$(grep -cx dns "$AI/cur.claude")" 0
+check "ai routed node, WAN unknown: logged" has x "$K/var/log/switchback.log" "the WAN device is unknown"
+rm -f "$AI/routes"
+# pins by hand point at the dead node, the probe name among them (18.11.2026): the router answers the dead node for
+# it; the service's own DoH (its DoT server's name, by its IP) gives the live one. Every pin on the dead node goes
+# there; a name the reserve holds (ChatGPT is on VPN) keeps its pin and gets the new "before" value
+cp "$K/rc.extra" "$K/rc.keep"
+printf 'ip host claude.com 10.0.0.5\nip host cdn.auth0.com 10.0.0.5\nip host chatgpt.com 10.0.0.5\n' >> "$K/rc.extra"
+aiback() { echo vpn > "$AI/cur.claude"; rm -f "$AI/best.claude"; echo 0 > "$AI/back"; : > "$K/ndmc.log"; : > "$K/curl.log"; }
+aiback; echo vpn > "$AI/cur.gpt"; touch "$AI/best.gpt"
+printf 'claude.ai 10.0.0.5\nclaude.com 10.0.0.5\nchatgpt.com 10.0.0.5\n' > "$AI/pinned"
+echo 10.0.0.5 > "$K/dns-claude.com"; echo 10.0.0.8 > "$K/svc-ip"; sb_k ai tick back
+check "ai past pins: back on its DNS service" equal x "$(cat "$AI/cur.claude")" dns
+check "ai past pins: asked the service's DoH" has x "$K/curl.log" 'url = "https://dns.claude.example/dns-query"'
+check "ai past pins: by its DoT address" has x "$K/curl.log" 'resolve = "dns.claude.example:443:5.6.7.8"'
+check "ai past pins: the live node"   has x "$K/ndmc.log" "ip host claude.ai 10.0.0.8"
+check "ai past pins: probe name moved" has x "$K/ndmc.log" "ip host claude.com 10.0.0.8"
+check "ai past pins: pins by hand moved" has x "$K/ndmc.log" "ip host cdn.auth0.com 10.0.0.8"
+check "ai past pins: the reserve's name left" hasnt x "$K/ndmc.log" "ip host chatgpt.com 10.0.0.8"
+check "ai past pins: its before value" has x "$AI/pinned" "chatgpt.com 10.0.0.8"
+mv "$K/rc.keep" "$K/rc.extra"; rm -f "$AI/best.gpt" "$K/svc-ip"
+# with the node auto-switch: a node of its reserve service (EXTRA_DOH, Zapret DNS) needs no QUIC rule
+printf 'EXTRA_DOH=%s\n' https://dns.zapret.moe/dns-query > "$K/etc/switchback/nodes.conf"
+aiback; printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; echo 10.0.0.9 > "$K/zdns-claude.ai"; sb_k ai tick back
+check "ai reserve node: taken"        has x "$K/ndmc.log" "ip host claude.ai 10.0.0.9"
+check "ai reserve node: no QUIC worry" hasnt x "$K/var/log/switchback.log" "no QUIC block rule"
+# the service's node without a QUIC rule: taken (it opens the site), and said so in the log
+aiback; printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; echo 10.0.0.10 > "$K/svc-ip"; sb_k ai tick back
+check "ai node without QUIC rule: taken" has x "$K/ndmc.log" "ip host claude.ai 10.0.0.10"
+check "ai node without QUIC rule: logged" has x "$K/var/log/switchback.log" "node 10.0.0.10 has no QUIC block rule"
+rm -f "$K/etc/switchback/nodes.conf" "$K/zdns-claude.ai" "$K/svc-ip"
+# the DNS service is silent directly (20.11.2026: the provider cuts TCP to all its servers); through the live tunnel
+# it answers: its addresses are known and shown, the dns path still only when one opens directly (by the WAN device)
+touch "$K/svc-down" "$K/node-tunnelonly-10.0.0.21"; echo 10.0.0.21 > "$K/svctun-ip"; export SB_WAN_DEV=ppp0
+aiback; printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; rm -f "$AI/svc.claude"; sb_k ai tick back
+check "ai svc by tunnel: asked through it"  has x "$K/curl.log" 'interface = "nwg0"'
+check "ai svc by tunnel: its addresses kept" has x "$AI/svc.claude" "Wireguard0 10.0.0.21"
+check "ai svc by tunnel: logged"            has x "$K/var/log/switchback.log" "through Wireguard0 it gives: 10.0.0.21"
+check "ai svc by tunnel: tested directly"   has x "$K/curl.log" "--interface ppp0 --resolve claude.ai:443:10.0.0.21"
+check "ai svc by tunnel: dns not taken"     equal x "$(grep -cx dns "$AI/cur.claude")" 0
+check "ai svc by tunnel: not pinned to it"  hasnt x "$K/ndmc.log" "ip host claude.ai 10.0.0.21"
+echo vpn > "$AI/cur.claude"; sb_k ai status --plain
+check "ai svc by tunnel: in the status"     has x "$K/out" "DNS-сервис отвечает через туннель Wireguard0"
+check "ai svc by tunnel: addresses shown"   has x "$K/out" "адреса 10.0.0.21; напрямую недоступны"
+# within AI_SVC_TUN_MIN: not asked through the tunnel again
+echo 10.0.0.22 > "$K/svctun-ip"; aiback; printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; sb_k ai tick back
+check "ai svc by tunnel: not every time"    hasnt x "$K/curl.log" 'interface = "nwg0"'
+# the provider lets the address through again: back on the dns path at once
+rm -f "$K/node-tunnelonly-10.0.0.21"; aiback; printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; sb_k ai tick back
+check "ai svc by tunnel, open directly: back" equal x "$(cat "$AI/cur.claude")" dns
+check "ai svc by tunnel, open directly: pinned" has x "$K/ndmc.log" "ip host claude.ai 10.0.0.21"
+# the answer grown old: asked through the tunnel again, the new address kept
+echo vpn > "$AI/cur.claude"; echo "0 Wireguard0 10.0.0.21" > "$AI/svc.claude"; aiback
+printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; touch "$K/node-dead-10.0.0.21" "$K/node-dead-10.0.0.22"; sb_k ai tick back
+check "ai svc by tunnel, old answer: asked again" has x "$AI/svc.claude" "Wireguard0 10.0.0.22"
+# silent through the tunnel too: said so
+touch "$K/svctun-down"; echo "0 Wireguard0 10.0.0.22" > "$AI/svc.claude"; aiback; printf 'claude.ai 10.0.0.5\n' > "$AI/pinned"; sb_k ai tick back
+echo vpn > "$AI/cur.claude"; sb_k ai status --plain
+check "ai svc silent both ways: in the status" has x "$K/out" "не отвечает ни напрямую, ни через туннель Wireguard0"
+rm -f "$K/svc-down" "$K/svctun-down" "$K/svctun-ip" "$K/node-dead-10.0.0.21" "$K/node-dead-10.0.0.22" "$AI/svc.claude"; unset SB_WAN_DEV
+rm -f "$K/etc/switchback/nodes.conf" "$K/zdns-claude.ai" "$K/svc-ip"
 printf 'uninstall_confirm=y\n' > "$K/u"; sb_k uninstall --answers "$K/u"
 check "ai uninstall: job gone"      missing x "$J"
 check "ai uninstall: Zapret DNS out of zapret list" hasnt x "$K/etc/nfqws2/lists/user.list" "dns.zapret.moe"
@@ -1899,6 +2190,720 @@ check "openwrt ai: exit 0"          equal x "$RC" 0
 check "openwrt ai: pinned"          has x "$R/uci.db" "/claude.ai/161.104.89.59"
 check "openwrt ai: minute job"      exists x "$R/etc/switchback/cron1/ai-path"
 
+# ---------- VLESS through Xray (lib/vless.sh): the link, Xray's settings, the service, the AI path, the bot ---------- [vless]
+# Every link here is made up (no real server, no real key); none of its secret parts may show anywhere
+keenetic vless
+printf 'profile=custom\nmodules=zapret vpn watchdog\nvpn_iface=Wireguard0\nbot_token=%s\nbot_chat=-100\n' "$TOKEN" > "$K/a"
+sb_k install --answers "$K/a"
+check "vless: base install"          equal x "$RC" 0
+export SB_XRAY_WAIT=0 SB_IPT=$K/bin/fipt SB_IPSET=$K/bin/fipset
+cat > "$K/bin/fipt" <<'EOF'
+#!/bin/sh
+echo "iptables $*" >> "$SB_OPT/ipt.log"
+case " $* " in *" -C "*|*" -D "*) exit 1 ;; esac
+exit 0
+EOF
+cat > "$K/bin/fipset" <<'EOF'
+#!/bin/sh
+echo "ipset $*" >> "$SB_OPT/ipt.log"
+[ "$2" = restore ] && cat >> "$SB_OPT/ipt.log"
+exit 0
+EOF
+chmod +x "$K/bin/fipt" "$K/bin/fipset"
+UUID=0f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b
+PBK=TestPublicKeyOnlyForTests_abcdefghijklmnopq
+SID=6ba85179e30d4fc2
+LINK="vless://$UUID@203.0.113.80:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.example.com&fp=chrome&pbk=$PBK&sid=$SID&type=tcp&headerType=none#%D0%94%D0%BE%D0%BC"
+X=$K/etc/switchback/xray.json; VI=$K/etc/init.d/S99switchback-xray; VH=$K/etc/ndm/netfilter.d/103-switchback-vless.sh
+printf '%s\n' "$LINK" > "$K/link"; : > "$K/curl.log"
+sb_k vless set --conf "$K/link"
+check "vless: exit 0"                equal x "$RC" 0
+check "vless: kind named"            has x "$K/out" "VLESS (Reality, tcp, vision)"
+check "vless: Reality"               has x "$X" '"security":"reality"'
+check "vless: the server's key"      has x "$X" "\"publicKey\":\"$PBK\""
+check "vless: shortId"               has x "$X" "\"shortId\":\"$SID\""
+check "vless: the user"              has x "$X" "\"id\": \"$UUID\""
+check "vless: vision"                has x "$X" '"flow": "xtls-rprx-vision"'
+check "vless: own mark"              has x "$X" '"mark": 23387'
+check "vless: redirect inbound"      has x "$X" '"protocol": "dokodemo-door"'
+check "vless: sniffing (the server resolves)" has x "$X" '"destOverride": ["http", "tls"]'
+check "vless: SOCKS for checks on localhost only" has x "$X" '"listen": "127.0.0.1", "port": 10809'
+check "vless: name after # dropped"  hasnt x "$X" "%D0"
+check "vless: checked by Xray first" has x "$K/xray.log" "xray run -test -c ${X%.json}.new.json"
+[ "$(stat -c %a "$K/probe" 2>/dev/null)" = 600 ] && check "vless: settings private" equal x "$(stat -c %a "$X")" 600
+check "vless: UUID not shown"        hasnt x "$K/out" "$UUID"
+check "vless: key not shown"         hasnt x "$K/out" "$PBK"
+check "vless: UUID not in the log"   hasnt x "$K/var/log/switchback.log" "$UUID"
+check "vless: key not in the log"    hasnt x "$K/var/log/switchback.log" "$PBK"
+check "vless: nothing secret in the journal" hasnt x "$K/etc/switchback/state" "$UUID"
+check "vless: journal"               has x "$K/etc/switchback/state" "vless"
+check "vless: link not kept"         hasnt x "$K/etc/switchback/vless.conf" "$UUID"
+check "vless: server address remembered (never redirected)" has x "$K/etc/switchback/vless.conf" 'SERVER_IPS="203.0.113.80"'
+check "vless: service installed"     exists x "$VI"
+check "vless: service paths filled"  hasnt x "$VI" "__"
+check "vless: hook installed"        exists x "$VH"
+check "vless: hook paths filled"     hasnt x "$VH" "__"
+check "vless: Xray started"          has x "$K/xray.log" "xray run -c $X"
+check "vless: running"               exists x "$K/var/run/sb-xray.pid"
+check "vless: checked through it"    has x "$K/curl.log" "--socks5-hostname 127.0.0.1:10809 https://claude.ai/"
+check "vless: says it works"         has x "$K/out" "VLESS работает"
+check "vless: not the program's file: left" exists x "$K/link"
+check "vless: nothing chosen: no rule" hasnt x "$K/ipt.log" "-I PREROUTING"
+check "vless: the copy on the router has it" exists x "$K/etc/switchback/app/lib/vless.sh"
+# TLS + ws (from the program or the bot: the file is wiped once read), TLS + grpc with an IPv6 server
+WS="vless://$UUID@cdn.example.net:443?type=ws&security=tls&path=%2Fws%3Fed%3D2048&host=cdn.example.net&sni=cdn.example.net&alpn=h2%2Chttp%2F1.1#ws"
+printf '%s\n' "$WS" > "$K/link"; export SB_ANSWERS_RM=1; sb_k vless set --conf "$K/link"; unset SB_ANSWERS_RM
+check "vless ws: exit 0"             equal x "$RC" 0
+check "vless ws: network"            has x "$X" '"network":"ws","wsSettings":{"path":"/ws?ed=2048","host":"cdn.example.net"}'
+check "vless ws: TLS with alpn"      has x "$X" '"tlsSettings":{"serverName":"cdn.example.net","fingerprint":"chrome","alpn":["h2","http/1.1"]}'
+check "vless ws: no vision"          hasnt x "$X" "flow"
+check "vless ws: file wiped"         missing x "$K/link"
+printf '%s\n' "vless://$UUID@[2001:db8::7]:8443?type=grpc&security=tls&serviceName=gsvc&mode=multi&sni=g.example.net" > "$K/link"
+sb_k vless set --conf "$K/link"
+check "vless grpc: exit 0"           equal x "$RC" 0
+check "vless grpc: service"          has x "$X" '"grpcSettings":{"serviceName":"gsvc","multiMode":true}'
+check "vless grpc: IPv6 server"      has x "$X" '"address": "2001:db8::7", "port": 8443'
+# broken links: refused with a reason, the settings before stay, nothing secret shown
+cp "$X" "$K/x.before"
+vbad() {   # vbad "description" "words of the reason" LINK
+  printf '%s\n' "$3" > "$K/link"; : > "$K/xray.log"; sb_k vless set --conf "$K/link"
+  check "vless bad ($1): refused"       equal x "$RC" 1
+  check "vless bad ($1): says why"      has x "$K/out" "$2"
+  check "vless bad ($1): settings kept" equal x "$(cat "$K/x.before")" "$(cat "$X")"
+  check "vless bad ($1): UUID not shown" hasnt x "$K/out" "$UUID"
+  check "vless bad ($1): UUID not logged" hasnt x "$K/var/log/switchback.log" "$UUID"
+}
+vbad "vmess"          "ссылки vless:// не нашёл" "vmess://$UUID@203.0.113.80:443"
+vbad "empty"          "ссылки vless:// не нашёл" "nothing here"
+vbad "no pbk"         "нет открытого ключа сервера (pbk)" "vless://$UUID@203.0.113.80:443?security=reality&sni=www.example.com&sid=$SID"
+vbad "short pbk"      "открытый ключ сервера (pbk) в ссылке неверный" "vless://$UUID@203.0.113.80:443?security=reality&sni=a.example&pbk=abc"
+vbad "no sni"         "нет имени сайта для Reality" "vless://$UUID@203.0.113.80:443?security=reality&pbk=$PBK"
+vbad "bad sid"        "shortId" "vless://$UUID@h.example:443?security=reality&sni=a.example&pbk=$PBK&sid=zz"
+vbad "no TLS"         "без шифрования" "vless://$UUID@203.0.113.80:80?type=ws&security=none"
+vbad "vision on ws"   "только с type=tcp" "vless://$UUID@h.example:443?type=ws&security=tls&flow=xtls-rprx-vision"
+vbad "port too big"   "порт сервера" "vless://$UUID@203.0.113.80:70000?security=tls"
+vbad "no port"        "нет порта" "vless://$UUID@203.0.113.80?security=tls"
+vbad "no user"        "нет идентификатора" "vless://203.0.113.80:443?security=tls"
+vbad "quote in user"  "UUID" "vless://ab\"cd@h.example:443?security=tls"
+vbad "unknown type"   "способ передачи" "vless://$UUID@h.example:443?security=tls&type=kcp"
+vbad "JSON in path"   "недопустимые знаки" "vless://$UUID@h.example:443?type=ws&security=tls&path=%2F%22%7D%2C%22x%22%3A%22"
+vbad "space in sni"   "недопустимые знаки" "vless://$UUID@h.example:443?security=tls&sni=a%20b"
+vbad "bad host"       "адрес сервера" "vless://$UUID@h_x.example:443?security=tls"
+vbad "encryption"     "encryption" "vless://$UUID@h.example:443?security=tls&encryption=aes-128-gcm"
+touch "$K/xray-bad"
+vbad "Xray refuses"   "Xray не принял" "$WS"
+check "vless bad: Xray's draft removed" missing x "$X.new"
+rm -f "$K/xray-bad"
+# a newer Xray calls dokodemo-door "tunnel": the new name is used when the old one is refused
+touch "$K/xray-tunnel"; printf '%s\n' "$LINK" > "$K/link"; sb_k vless set --conf "$K/link"; rm -f "$K/xray-tunnel"
+check "vless: newer Xray: tunnel"    has x "$X" '"protocol": "tunnel"'
+printf '%s\n' "$LINK" > "$K/link"; sb_k vless set --conf "$K/link"
+check "vless: back to Reality"       has x "$X" '"security":"reality"'
+# status, report (a link that somehow got into a log is masked there)
+sb_k status
+check "vless status: section"        has x "$K/out" "VLESS через Xray"
+check "vless status: kind"           has x "$K/out" "VLESS настроен: Reality, tcp, vision"
+check "vless status: no site by default" has x "$K/out" "свои сайты через VLESS не выбраны"
+echo "pasted by mistake: $LINK" >> "$K/var/log/switchback.log"
+sb_k report
+check "vless report: given out"      equal x "$RC" 0
+check "vless report: link masked"    has x "$K/out" "vless://<скрыто>"
+check "vless report: no UUID"        hasnt x "$K/out" "$UUID"
+check "vless report: no key"         hasnt x "$K/out" "$PBK"
+sed -i '/pasted by mistake/d' "$K/var/log/switchback.log"
+# the AI reserve: "vless" is the fifth path, the last one
+cat > "$K/bin/ip" <<'EOF'
+#!/bin/sh
+case "$*" in "route get "*) echo "$3 dev nwg0 src 10.8.0.2" ;; esac
+EOF
+chmod +x "$K/bin/ip"
+echo 160.79.104.10 > "$K/vless-ip"
+sb_k ai on
+check "ai+vless: on"                 equal x "$RC" 0
+export SB_T_AI_FEW=1
+check "ai+vless: the job keeps Xray up" has x "$K/etc/cron.1min/ai-path" "$VI ensure"
+: > "$K/ndmc.log"; : > "$K/curl.log"; : > "$K/ipt.log"; sb_k ai via vless 2
+check "ai via vless: exit 0"         equal x "$RC" 0
+check "ai via vless: Claude"         equal x "$(cat "$K/var/ai-path/cur.claude")" vless
+check "ai via vless: real address pinned" has x "$K/ndmc.log" "ip host claude.ai 160.79.104.10"
+check "ai via vless: names asked through Xray" has x "$K/curl.log" 'proxy = "socks5h://127.0.0.1:10809"'
+check "ai via vless: address to Xray" has x "$K/etc/switchback/vless.ips" "160.79.104.10/32 ai:claude"
+check "ai via vless: set filled"     has x "$K/ipt.log" "add sb-vless-new 160.79.104.10/32"
+check "ai via vless: home devices redirected" has x "$K/ipt.log" "-I PREROUTING -p tcp -m set --match-set sb-vless dst -m mark ! --mark 0x5b5b -j REDIRECT --to-ports 10808"
+check "ai via vless: the router too" has x "$K/ipt.log" "-I OUTPUT -p tcp ! --sport 61100:61119 -m set --match-set sb-vless dst -m mark ! --mark 0x5b5b -j REDIRECT --to-ports 10808"
+check "ai via vless: home devices have no port exception" hasnt x "$K/ipt.log" "PREROUTING -p tcp ! --sport"
+check "ai via vless: the older router rule goes" has x "$K/ipt.log" "-D OUTPUT -p tcp -m set --match-set sb-vless dst"
+check "ai via vless: held by hand"   has x "$K/etc/switchback/ai.conf" "MODE=vless"
+check "ai via vless: for 2 h"        has x "$K/out" "вручную на 2 ч"
+sb_k ai status
+check "ai status: VLESS named"       has x "$K/out" "Claude: VLESS (Xray)"
+# leaving the path takes its addresses out
+echo 161.104.89.59 > "$K/zdns-ip"; : > "$K/ipt.log"; sb_k ai via zdns
+check "ai leaves vless: Claude"      equal x "$(cat "$K/var/ai-path/cur.claude")" zdns
+check "ai leaves vless: address out" hasnt x "$K/etc/switchback/vless.ips" "ai:claude"
+check "ai leaves vless: set synced"  has x "$K/ipt.log" "swap sb-vless-new sb-vless"
+# automatic choice: VLESS only when nothing before it works; a working VPN path comes first
+rm -f "$K/zdns-ip"; touch "$K/zdns-down"
+for ip in $(grep -v '^#' "$SRC/lists/ai-claude-proxies.nets" | sed 's#/32##'); do touch "$K/node-dead-$ip"; done
+sb_k ai auto
+check "ai auto: nothing else works -> vless" equal x "$(cat "$K/var/ai-path/cur.claude")" vless
+echo 160.79.104.10 > "$K/vpn-ip"; sb_k ai auto
+check "ai auto: VPN before VLESS"    equal x "$(cat "$K/var/ai-path/cur.claude")" vpn
+# Claude's artifacts answer 451 by the VPN path (20.11.2026: every tunnel let claudeusercontent.com out in Russia):
+# not "dead" (claude.ai opens): the job asks for another path at once, the VPN path fails its test, VLESS is taken
+AJ() { SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$K/etc/cron.1min/ai-path" > "$K/aj.out" 2>&1; }
+touch "$K/frame-451-vpn" "$K/frame-451-dns"; echo 160.79.104.10 > "$K/dns-claude.ai"; : > "$K/curl.log"; AJ
+check "ai frame 451: the job saw it"  has x "$K/var/ai-path/log" "artifacts (claudeusercontent.com) answer 451 by vpn"
+check "ai frame 451: not dead"        missing x "$K/var/ai-path/bad.claude"
+check "ai frame 451: -> vless at once" equal x "$(cat "$K/var/ai-path/cur.claude")" vless
+check "ai frame 451: told"            has x "$K/var/log/switchback.log" "через VPN (туннель Wireguard0) не открывались"
+echo 160.79.104.10 > "$K/vpn-ip"; sb_k ai auto
+check "ai frame 451: auto keeps vless" equal x "$(cat "$K/var/ai-path/cur.claude")" vless
+check "ai frame 451: VPN refused"     has x "$K/var/log/switchback.log" "answer 451 this way"
+# VLESS dead too: the VPN path opens the site at least, it is taken anyway (21.11.2026: refused, Claude stayed on dead VLESS)
+touch "$K/vless-dead"; sb_k ai auto
+check "ai frame 451, VLESS dead: VPN anyway" equal x "$(cat "$K/var/ai-path/cur.claude")" vpn
+check "ai frame 451, VLESS dead: logged" has x "$K/var/log/switchback.log" "opens the site at least"
+rm -f "$K/vless-dead"; sb_k ai auto
+# no other path opens them: stays, no alarm, said in the status; tried again only after BACK_MIN
+touch "$K/vless-dead"; echo vpn > "$K/var/ai-path/cur.claude"; rm -f "$K/var/ai-path/frame.claude"; : > "$K/curl.log"; AJ
+check "ai frame 451, nothing else: stays" equal x "$(cat "$K/var/ai-path/cur.claude")" vpn
+check "ai frame 451, nothing else: no alarm" hasnt x "$K/curl.log" "sendMessage"
+check "ai frame 451, nothing else: logged" has x "$K/var/log/switchback.log" "no other path opens them"
+sb_k ai status
+check "ai frame 451: in the status"   has x "$K/out" "артефакты (claudeusercontent.com) этим путём не открываются"
+n=$(grep -c "tick frame" "$K/var/ai-path/log"); AJ
+check "ai frame 451: not every minute" equal x "$(grep -c "tick frame" "$K/var/ai-path/log")" "$n"
+rm -f "$K/frame-451-vpn" "$K/frame-451-dns" "$K/vless-dead"; AJ
+check "ai frame open again: noted"    has x "$K/var/ai-path/log" "claude: artifacts open again"
+check "ai frame open again: status clean" missing x "$K/var/ai-path/frame.claude"
+rm -f "$K/dns-claude.ai"; sb_k ai auto
+check "ai frame open again: VPN back" equal x "$(cat "$K/var/ai-path/cur.claude")" vpn
+# one address for both groups, Claude on VLESS, ChatGPT on VPN (21.11.2026: ChatGPT, shown as VPN, really went into Xray)
+AP=$K/var/ai-path; VI2=$K/etc/switchback/vless.ips
+echo 10.9.9.1 > "$K/vless-ip"; echo 10.9.9.1 > "$K/vpn-ip"; sb_k ai via vless
+echo vpn > "$AP/cur.gpt"; echo "gpt 10.9.9.1 Wireguard0" >> "$AP/routes"; echo 10.9.9.1 > "$K/dns-chatgpt.com"
+sed -i "/ ai:gpt$/d" "$VI2"   # what leaving VLESS does to the group's tag
+echo "203.0.113.9/32 sos:telegram" >> "$VI2"; date +%s > "$AP/vpn.gpt"; echo 0 > "$AP/vless.claude"; sb_k ai tick refresh
+check "ai shared: no address of its own: said" exists x "$AP/shared.claude"
+sb_k ai status
+check "ai shared: the status: really VLESS" has x "$K/out" "ChatGPT: на деле идёт через VLESS"
+check "ai shared: the status: Claude's side" has x "$K/out" "общий с другой группой"
+# Claude has an address of its own: its names move there, ChatGPT's address leaves the redirect
+echo "10.9.9.2/32 ai:claude" >> "$VI2"; echo 0 > "$AP/vless.claude"; : > "$K/ndmc.log"; sb_k ai tick refresh
+check "ai shared: Claude on its own address" has x "$VI2" "10.9.9.2/32 ai:claude"
+check "ai shared: the common address left" hasnt x "$VI2" "10.9.9.1/32"
+check "ai shared: Claude's names moved" has x "$K/ndmc.log" "ip host claude.ai 10.9.9.2"
+check "ai shared: ChatGPT not repinned to it" hasnt x "$K/ndmc.log" "ip host chatgpt.com 10.9.9.2"
+check "ai shared: the mark gone"      missing x "$AP/shared.claude"
+check "ai shared: ChatGPT's route stays" has x "$AP/routes" "gpt 10.9.9.1 Wireguard0"
+check "ai shared: vless sos untouched" has x "$VI2" "203.0.113.9/32 sos:telegram"
+check "ai shared: Claude stays on VLESS" equal x "$(cat "$AP/cur.claude")" vless
+sb_k ai status
+check "ai shared: the status is clean" hasnt x "$K/out" "на деле идёт через VLESS"
+# ChatGPT's VPN address becomes the one Claude holds: found after ChatGPT's own change, and said
+printf 'ip host claude.ai 10.9.9.2\n' >> "$K/rc.extra"   # the fake router's config does not keep pins by itself
+echo 10.9.9.2 > "$K/vpn-ip"; echo 10.9.9.2 > "$K/dns-chatgpt.com"; echo 0 > "$AP/vpn.gpt"; date +%s > "$AP/vless.claude"; sb_k ai tick refresh
+check "ai shared: found after the other's change" exists x "$AP/shared.claude"
+# with an address of its own, Claude lets go of the one ChatGPT took
+echo "10.9.9.3/32 ai:claude" >> "$VI2"; echo 0 > "$AP/vpn.gpt"; : > "$K/ndmc.log"; sb_k ai tick refresh
+check "ai shared: moved after the other's change" has x "$K/ndmc.log" "ip host claude.ai 10.9.9.3"
+check "ai shared: ChatGPT's address out of the set" hasnt x "$VI2" "10.9.9.2/32"
+check "ai shared: moved: the mark gone" missing x "$AP/shared.claude"
+sed -i '/ sos:telegram$/d' "$VI2"; sed -i '/^ip host claude.ai 10.9.9.2$/d' "$K/rc.extra"; rm -f "$K/dns-chatgpt.com" "$AP/shared.claude"
+echo 160.79.104.10 > "$K/vless-ip"; echo 160.79.104.10 > "$K/vpn-ip"; sb_k ai auto
+check "ai shared: Claude back on VPN" equal x "$(cat "$AP/cur.claude")" vpn
+rm -f "$K/vpn-ip"
+touch "$K/vless-dead"; sb_k ai via vless
+check "ai via vless (dead): refused" has x "$K/out" "сайт сейчас не открывается"
+rm -f "$K/vless-dead"
+# the bot: a link as text (Telegram escapes "/"), applied, never logged or repeated, the message deleted
+SL='\/'
+botlink() { printf '{"ok":true,"result":[{"update_id":%s,"message":{"message_id":77,"chat":{"id":-100},"text":"%s"}}]}\n' "$1" "$2" > "$K/updates"; }
+botlink 401 "vless:${SL}${SL}$UUID@203.0.113.81:443?security=reality&sni=bot.example.com&pbk=$PBK&sid=$SID&type=tcp&flow=xtls-rprx-vision#home"
+bot1
+check "bot vless: applied"           has x "$X" '"serverName":"bot.example.com"'
+check "bot vless: case kept"         has x "$X" "\"publicKey\":\"$PBK\""
+check "bot vless: slashes unescaped" has x "$K/etc/switchback/vless.conf" 'SERVER_IPS="203.0.113.81"'
+check "bot vless: logged without it" has x "$K/var/sb-bot/log" "vless link received"
+check "bot vless: UUID not in its log" hasnt x "$K/var/sb-bot/log" "$UUID"
+check "bot vless: key not in its log" hasnt x "$K/var/sb-bot/log" "$PBK"
+check "bot vless: not repeated"      hasnt x "$K/curl.log" "$UUID"
+check "bot vless: message deleted"   has x "$K/curl.log" "deleteMessage -d chat_id=-100 -d message_id=77"
+check "bot vless: says so"           has x "$K/curl.log" "Сообщение со ссылкой удалено"
+check "bot vless: no copy left"      missing x "$K/var/sb-bot/vless-in"
+check "bot vless: no batch left"     missing x "$K/var/sb-bot/batch"
+check "bot vless: not a command"     hasnt x "$K/var/sb-bot/log" "command /"
+# a broken link: the reason, no values
+botlink 402 "vless:${SL}${SL}$UUID@203.0.113.81:443?security=reality&sni=bot.example.com"; bot1
+check "bot vless bad: reason"        has x "$K/curl.log" "нет открытого ключа сервера"
+check "bot vless bad: not repeated"  hasnt x "$K/curl.log" "$UUID"
+# a link in a .txt file
+printf 'my server:\n%s\n' "vless://$UUID@203.0.113.82:443?security=reality&sni=file.example.com&pbk=$PBK&sid=$SID" > "$K/tg-file"
+botdoc "link.txt"; bot1
+check "bot vless file: applied"      has x "$X" '"serverName":"file.example.com"'
+check "bot vless file: wiped"        missing x "$K/var/sb-bot/vless-in"
+check "bot vless file: not repeated" hasnt x "$K/curl.log" "$UUID"
+# /ai has the VLESS button; /vless: nothing through it by default, a button per site, the CPU warning
+botmsg "/ai"; bot1
+check "bot /ai: VLESS button"        has x "$K/curl.log" '"callback_data":"ai vless"'
+botmsg "/vless"; bot1
+check "bot /vless: state"            has x "$K/curl.log" "VLESS настроен"
+check "bot /vless: Telegram button"  has x "$K/curl.log" '"callback_data":"vless on telegram"'
+check "bot /vless: Instagram button" has x "$K/curl.log" '"callback_data":"vless on instagram"'
+check "bot /vless: CPU warning"      has x "$K/curl.log" "процессор роутера"
+botmsg "/vless on telegram" "yes"; bot1
+check "bot vless telegram: asks first" has x "$K/curl.log" "Пустить telegram через VLESS?"
+check "bot vless telegram: warns"    has x "$K/curl.log" "15–20 Мбит/с"
+check "bot vless telegram: on"       has x "$K/etc/switchback/sites" "vless telegram"
+check "bot vless telegram: its networks" has x "$K/etc/switchback/vless.ips" "91.108.56.0/22 site:telegram"
+printf '10.4.4.4\n' > "$K/dns-viav.example"
+botmsg "/site add viav.example vless" "yes"; bot1
+check "bot vless site: asks with the warning" has x "$K/curl.log" "Пустить viav.example через VLESS?"
+check "bot vless site: on"           has x "$K/etc/switchback/sites" "vless viav.example"
+check "bot vless site: its address"  has x "$K/etc/switchback/vless.ips" "10.4.4.4/32 site:viav.example"
+check "bot vless site: refresh job"  exists x "$K/etc/cron.1min/sb-sites"
+check "bot vless site: job keeps Xray up" has x "$K/etc/cron.1min/sb-sites" "$VI ensure"
+sb_k sites
+check "sites: Telegram via VLESS"    has x "$K/out" "Telegram — через VLESS"
+check "sites: own site via VLESS"    has x "$K/out" "viav.example — через VLESS (адресов: 1)"
+printf '10.4.4.4\n10.4.4.5\n' > "$K/dns-viav.example"; sb_k sites refresh
+check "sites refresh: new address to VLESS" has x "$K/etc/switchback/vless.ips" "10.4.4.5/32 site:viav.example"
+botmsg "/vless off telegram" "yes"; bot1
+check "bot vless telegram: off"      hasnt x "$K/etc/switchback/sites" "vless telegram"
+check "bot vless telegram: networks out" hasnt x "$K/etc/switchback/vless.ips" "site:telegram"
+sb_k sites add claude.ai --via vless
+check "sites: AI site via VLESS -> the reserve" has x "$K/out" "Claude через VLESS"
+# off: the AI reserve leaves the path, everything of VLESS goes
+sb_k ai via vless
+check "ai via vless again"           equal x "$(cat "$K/var/ai-path/cur.claude")" vless
+: > "$K/ipt.log"; sb_k vless off
+check "vless off: exit 0"            equal x "$RC" 0
+check "vless off: AI moved away"     hasnt x "$K/var/ai-path/cur.claude" vless
+check "vless off: AI back to auto"   has x "$K/etc/switchback/ai.conf" "MODE=auto"
+check "vless off: settings gone"     missing x "$X"
+check "vless off: service gone"      missing x "$VI"
+check "vless off: hook gone"         missing x "$VH"
+check "vless off: Xray stopped"      missing x "$K/var/run/sb-xray.pid"
+check "vless off: rules out"         has x "$K/ipt.log" "-D PREROUTING -p tcp -m set --match-set sb-vless"
+check "vless off: own sites out"     hasnt x "$K/etc/switchback/sites" "vless "
+check "vless off: journal clean"     equal x "$(grep -c -e "^vless$" -e "^site vless " -e "netfilter.d/103-switchback-vless.sh$" "$K/etc/switchback/state")" 0
+sb_k ai via vless
+check "ai via vless (none): says how" has x "$K/out" "пришлите боту ссылку vless://"
+# dry run changes nothing; uninstall takes everything back
+printf '%s\n' "$LINK" > "$K/link"; sb_k vless set --conf "$K/link" --dry-run
+check "vless dry: nothing written"   missing x "$X"
+sb_k vless set --conf "$K/link"
+printf 'uninstall_confirm=y\n' > "$K/u"; sb_k uninstall --answers "$K/u"
+check "vless uninstall: settings gone" missing x "$X"
+check "vless uninstall: service gone" missing x "$VI"
+check "vless uninstall: Xray stopped" missing x "$K/var/run/sb-xray.pid"
+unset SB_XRAY_WAIT SB_IPT SB_IPSET
+# OpenWrt: not yet
+openwrt vless-owrt
+printf '%s\n' "$LINK" > "$R/link"; sb_o vless set --conf "$R/link"
+check "openwrt vless: refused"       has x "$R/out" "только на Keenetic"
+check "openwrt vless: UUID not shown" hasnt x "$R/out" "$UUID"
+
+# ---------- a VLESS subscription (lib/vsub.sh): parsed, checked in batches, the best behind a balancer ---------- [vsub]
+# Every link, key and address here is made up; none of their secret parts may show anywhere
+keenetic vsub
+printf 'profile=custom\nmodules=zapret vpn watchdog\nvpn_iface=Wireguard0\nbot_token=%s\nbot_chat=-100\n' "$TOKEN" > "$K/a"
+sb_k install --answers "$K/a"
+check "vsub: base install"           equal x "$RC" 0
+export SB_XRAY_WAIT=0 SB_IPT=$K/bin/fipt SB_IPSET=$K/bin/fipset VSUB_SHUFFLE=0
+printf '#!/bin/sh\necho "iptables $*" >> "$SB_OPT/ipt.log"\ncase " $* " in *" -C "*|*" -D "*) exit 1 ;; esac\nexit 0\n' > "$K/bin/fipt"
+printf '#!/bin/sh\necho "ipset $*" >> "$SB_OPT/ipt.log"\n[ "$2" = restore ] && cat >> "$SB_OPT/ipt.log"\nexit 0\n' > "$K/bin/fipset"
+chmod +x "$K/bin/fipt" "$K/bin/fipset"
+PBK=TestPublicKeyOnlyForTests_abcdefghijklmnopq
+SUBTOK=SubTokenForTestsOnly0123456789abcdef
+SUBURL="https://sub.example.net/api/sub/$SUBTOK"
+uuid() { printf '1f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a%02x' "$1"; }
+key() {   # key N [NAME]: a made-up Reality key to 203.0.113.N
+  s=www.microsoft.com; [ $(($1 % 2)) = 0 ] && s=www.ozon.ru
+  printf 'vless://%s@203.0.113.%s:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=6ba8517%s&type=tcp#%s\n' \
+    "$(uuid "$1")" "$1" "$s" "$PBK" "$(printf %x $(($1 % 16)))" "${2:-%F0%9F%87%B3%F0%9F%87%B1%20NL-$1}"
+}
+# 20 keys (1-5 dead, 6 no Claude, 7 no ChatGPT, 8 refused by Xray, 9 no Telegram), 2 repeats, 3 broken, 4 of other kinds
+{ i=1; while [ $i -le 20 ]; do key $i; i=$((i+1)); done
+  key 9 "again"; key 10 "%D0%B5%D1%89%D1%91"
+  echo "vless://$(uuid 30)@203.0.113.30:443?security=reality&sni=x.example&sid=ab"
+  echo "vless://$(uuid 31)@203.0.113.31?security=reality&pbk=$PBK&sni=x.example"
+  echo "vless://not a link"
+  echo "vmess://eyJhZGQiOiIyMDMuMC4xMTMuNDAifQ=="; echo "vmess://eyJhZGQiOiIyMDMuMC4xMTMuNDEifQ=="
+  echo "trojan://secretpass@203.0.113.42:443#t"; echo "ss://YWVzLTI1Ni1nY206cGFzcw@203.0.113.43:8388#s"
+} > "$K/sub.plain"
+base64 < "$K/sub.plain" | tr -d '\n' > "$K/sub-body"            # one blob, no line breaks
+for h in 1 2 3 4 5; do touch "$K/vsub-dead-203.0.113.$h"; done
+touch "$K/vsub-noclaude-203.0.113.6" "$K/vsub-nogpt-203.0.113.7" "$K/xray-refuse-203.0.113.8" "$K/vsub-notg-203.0.113.9"
+i=9; while [ $i -le 20 ]; do printf '0.%03d\n' $((400 - i * 10)) > "$K/vsub-ms-203.0.113.$i"; i=$((i+1)); done
+echo 1.2 > "$K/vsub-sec-203.0.113.19"                            # 20 Mbit/s: before .20 (same 50 ms step, 6 Mbit/s)
+touch "$K/vsub-noovh-203.0.113.18"                               # the first address gives nothing: the second one
+echo "20.000 1000000" > "$K/vsub-cut-203.0.113.17"               # cut at 20 s: 1 MB came, 0.4 Mbit/s (after .16)
+X=$K/etc/switchback/xray.json; P=$K/etc/switchback/vless.pool; J=$K/etc/cron.5mins/sb-vless-sub
+printf '%s\n' "$SUBURL" > "$K/sub"; : > "$K/curl.log"; : > "$K/xray.log"
+sb_k vless sub set --conf "$K/sub"
+check "vsub: exit 0"                 equal x "$RC" 0
+check "vsub: address kept"           has x "$K/etc/switchback/vless.sub" "$SUBURL"
+[ "$(stat -c %a "$K/probe" 2>/dev/null)" = 600 ] && check "vsub: address private" equal x "$(stat -c %a "$K/etc/switchback/vless.sub")" 600
+check "vsub: fetched in a config file, not a command line" hasnt x "$K/curl.log" "$SUBTOK"
+check "vsub: base64 decoded, kinds counted" has x "$K/out" "в подписке ссылок: 29 — VLESS 25, других 4"
+check "vsub: other kinds named"      has x "$K/out" "vmess 2"
+check "vsub: other kinds skipped"    has x "$K/out" "пропущены, нужен VLESS"
+check "vsub: repeats and broken"     has x "$K/out" "разных ключей VLESS: 20 (повторы 2, не разобрать 3)"
+check "vsub: the best checked again in one batch" has x "$K/xray.log" "batch 10"
+check "vsub: the batch checked by Xray first" has x "$K/xray.log" "run -test -c $SB_TMP/switchback-vsub."
+check "vsub: the refused batch split" has x "$K/xray.log" "batch 5"
+check "vsub: one SOCKS port a key"   has x "$K/curl.log" "--socks5-hostname 127.0.0.1:10821 https://www.gstatic.com/generate_204"
+check "vsub: Claude checked"         has x "$K/curl.log" "127.0.0.1:10821 https://claude.ai/"
+check "vsub: Claude's API checked"   has x "$K/curl.log" "127.0.0.1:10821 https://api.anthropic.com/"
+check "vsub: ChatGPT checked"        has x "$K/curl.log" "127.0.0.1:10821 https://chatgpt.com/"
+check "vsub: Telegram checked"       has x "$K/curl.log" "127.0.0.1:10821 https://api.telegram.org/"
+check "vsub: light speed check"     has x "$K/curl.log" "-r 0-2999999 --connect-timeout 6 --max-time 20"
+check "vsub: speed from OVH first"   has x "$K/curl.log" "https://proof.ovh.net/files/10Mb.dat"
+check "vsub: speed of 5 only"        equal x "$(grep -c 'proof.ovh.net' "$K/curl.log")" 5
+check "vsub: the next address when one gives nothing" equal x "$(grep -c 'speed.cloudflare.com/__down?bytes=3000000' "$K/curl.log")" 1
+check "vsub: summary"                has x "$K/out" "Итог: проверено 20 из 20 за "
+check "vsub: counts"                 has x "$K/out" "живые 14, Claude открывается через 13, ChatGPT через 13, Telegram через 13, подходят 12; Xray не принял 1; оставлено 8, лучшая задержка 200 мс."
+check "vsub: 8 kept"                 equal x "$(wc -l < "$P" | tr -d ' ')" 8
+check "vsub: pool private"           has x "$K/etc/switchback/vless.pool" "203.0.113.19"
+check "vsub: first: same step, faster" equal x "$(head -n 1 "$P" | cut -f1-3)" "210	20.0	www.microsoft.com"
+check "vsub: second"                 equal x "$(sed -n 2p "$P" | cut -f1-2)" "200	6.0"
+check "vsub: next step by speed, then delay" equal x "$(cut -f1 "$P" | tr '\n' ' ')" "210 200 220 240 230 250 260 270 "
+check "vsub: speed by the second address" equal x "$(sed -n 3p "$P" | cut -f1-2)" "220	6.0"
+check "vsub: a cut download: what came" equal x "$(sed -n 5p "$P" | cut -f1-2)" "230	0.4"
+check "vsub: no dead one kept"       hasnt x "$P" "@203.0.113.5:"
+check "vsub: no key without Claude"  hasnt x "$P" "@203.0.113.6:"
+check "vsub: no key without ChatGPT" hasnt x "$P" "@203.0.113.7:"
+check "vsub: name shown"             has x "$K/out" "1. 🇳🇱 NL-19 (www.microsoft.com) — 210 мс, 20.0 Мбит/с"
+check "vsub: the 6th without speed"  has x "$K/out" "6. 🇳🇱 NL-15 (www.microsoft.com) — 250 мс"
+check "vsub: balancer outbounds"     has x "$X" '"tag": "vless-8"'
+check "vsub: no more than 8"         hasnt x "$X" '"tag": "vless-9"'
+check "vsub: best first"             has x "$X" '"address": "203.0.113.19", "port": 443'
+check "vsub: leastPing"              has x "$X" '"balancers": [{"tag": "pool", "selector": ["vless-"], "strategy": {"type": "leastPing"}, "fallbackTag": "vless-1"}]'
+check "vsub: everything through it"  has x "$X" '"inboundTag": ["redirect", "check"], "balancerTag": "pool"'
+check "vsub: observatory"            has x "$X" '"observatory": {"subjectSelector": ["vless-"], "probeURL": "https://www.gstatic.com/generate_204", "probeInterval": "3m"'
+# Xray's settings must be valid JSON (the fake Xray takes anything): the working one and a batch's
+PY=""; for c in python3 python; do "$c" -c '' >/dev/null 2>&1 && { PY=$c; break; }; done
+jsonok() { "$PY" -c 'import json,sys; json.load(sys.stdin)' < "$2"; }
+if [ -n "$PY" ]; then
+  check "vsub: settings are JSON"    jsonok x "$X"
+  check "vsub: a batch is JSON"      jsonok x "$K/batch-last.json"
+fi
+check "vsub: own mark on each"       equal x "$(grep -c '"mark": 23387' "$X")" 8
+check "vsub: redirect and SOCKS kept" has x "$X" '"listen": "127.0.0.1", "port": 10809'
+check "vsub: servers never redirected" has x "$K/etc/switchback/vless.conf" "203.0.113.19"
+check "vsub: kind"                   has x "$K/etc/switchback/vless.conf" 'KIND="подписка, ключей: 8 (балансировщик)"'
+check "vsub: service started"        has x "$K/xray.log" "xray run -c $X"
+check "vsub: works through it"       has x "$K/out" "VLESS работает"
+check "vsub: daily job"              exists x "$J"
+check "vsub: job paths filled"       hasnt x "$J" "__"
+check "vsub: job in the journal"     has x "$K/etc/switchback/state" "file $J"
+check "vsub: work files gone"        equal x "$(ls -d "$SB_TMP"/switchback-vsub.* 2>/dev/null)" ""
+check "vsub: lock gone"              missing x "$K/var/run/sb-vsub.lock"
+check "vsub: list kept for a refill" equal x "$(wc -l < "$K/etc/switchback/vless.list" | tr -d ' ')" 20
+for f in "$K/out" "$K/var/log/switchback.log" "$K/etc/switchback/state" "$K/etc/switchback/vless.stat" "$K/etc/switchback/vless.conf"; do
+  n=${f##*/}
+  check "vsub: no UUID in $n"        hasnt x "$f" "1f1e2d3c-4b5a"
+  check "vsub: no key in $n"         hasnt x "$f" "$PBK"
+  check "vsub: no address of it in $n" hasnt x "$f" "$SUBTOK"
+done
+check "vsub: no link in the output"  hasnt x "$K/out" "vless://"
+check "vsub: no trojan password"     hasnt x "$K/out" "secretpass"
+check "vsub: logged as numbers"      has x "$K/var/log/switchback.log" "vless sub: links 29, vless 25, unique 20 (dup 2, broken 3), checked 20"
+# the status
+sb_k vless status
+check "vsub status: pool"            has x "$K/out" "ключи подписки: 8 в балансировщике, лучшая задержка 200 мс"
+check "vsub status: names"           has x "$K/out" "NL-20 (www.ozon.ru) — 200 мс"
+check "vsub status: kind"            has x "$K/out" "VLESS настроен: подписка, ключей: 8 (балансировщик)"
+check "vsub status: no UUID"         hasnt x "$K/out" "1f1e2d3c-4b5a"
+sb_k vless sub status
+check "vsub sub status"              has x "$K/out" "адрес подписки сохранён"
+# the AI reserve's path and own sites through VLESS work through the balancer unchanged
+echo 160.79.104.10 > "$K/vless-ip"; cat > "$K/bin/ip" <<'EOF'
+#!/bin/sh
+case "$*" in "route get "*) echo "$3 dev nwg0 src 10.8.0.2" ;; esac
+EOF
+chmod +x "$K/bin/ip"
+sb_k ai on; sb_k ai via vless 2
+check "vsub+ai: Claude through the pool" equal x "$(cat "$K/var/ai-path/cur.claude")" vless
+check "vsub+ai: address to Xray"     has x "$K/etc/switchback/vless.ips" "160.79.104.10/32 ai:claude"
+# plain text on stdin; a link a line, each in base64; a blob wrapped at 76; a subscription that answers only to a client
+sb_k vless sub set --conf - < "$K/sub.plain"
+check "vsub plain: read"             has x "$K/out" "в подписке ссылок: 29 — VLESS 25"
+check "vsub plain: address kept from before" has x "$K/etc/switchback/vless.sub" "$SUBTOK"
+{ key 19 | tr -d '\n' | base64 | tr -d '\n'; echo; key 20 | tr -d '\n' | base64 | tr -d '\n'; echo; key 9 x | tr -d '\n' | base64 | tr -d '=\n'; echo; } > "$K/lines.b64"
+sb_k vless sub set --conf "$K/lines.b64"
+check "vsub b64 lines: read"         has x "$K/out" "в подписке ссылок: 3 — VLESS 3"
+check "vsub b64 lines: all kept"     equal x "$(wc -l < "$P" | tr -d ' ')" 3
+base64 < "$K/sub.plain" | fold -w 76 > "$K/sub-body"
+touch "$K/sub-ua"; sb_k vless sub set --conf "$K/sub"; rm -f "$K/sub-ua"
+check "vsub wrapped: read"           has x "$K/out" "в подписке ссылок: 29 — VLESS 25"
+check "vsub: asked again as a client" has x "$K/curl.log" "-A v2rayNG/1.8.5"
+# the same blob without base64 -d (the awk decoder); the link per line above never takes base64 -d
+export VSUB_NO_B64=1; sb_k vless sub set --conf "$K/sub-body"; unset VSUB_NO_B64
+check "vsub wrapped, awk decoder: read" has x "$K/out" "в подписке ссылок: 29 — VLESS 25"
+base64 < "$K/sub.plain" | tr -d '\n' > "$K/blob1"; sb_k vless sub set --conf "$K/blob1"
+check "vsub one-line blob: read"     has x "$K/out" "в подписке ссылок: 29 — VLESS 25"
+# bad inputs: nothing found, a page, broken only; the working settings stay
+cp "$X" "$K/x.before"
+printf 'nothing here\n' > "$K/bad"; sb_k vless sub set --conf "$K/bad"
+check "vsub bad: refused"            equal x "$RC" 1
+check "vsub bad: says why"           has x "$K/out" "в подписке не нашёл ссылок"
+printf '<html><body>login</body></html>\n' > "$K/bad"; sb_k vless sub set --conf "$K/bad"
+check "vsub page: says why"          has x "$K/out" "вместо подписки пришла веб-страница"
+printf 'vless://%s@203.0.113.30:443?security=none\nvmess://abc\n' "$(uuid 30)" > "$K/bad"; sb_k vless sub set --conf "$K/bad"
+check "vsub broken only: refused"    has x "$K/out" "ни одной годной ссылки VLESS"
+check "vsub broken only: no UUID"    hasnt x "$K/out" "1f1e2d3c"
+check "vsub bad: settings kept"      equal x "$(cat "$K/x.before")" "$(cat "$X")"
+# all dead: nothing kept, the old keys stay
+for h in 7 9 10 11 12 13 14 15 16 17 18 19 20; do touch "$K/vsub-dead-203.0.113.$h"; done
+sb_k vless sub set --conf "$K/sub.plain"
+check "vsub all dead: says so"       has x "$K/out" "подходящих ключей нет"
+check "vsub all dead: old ones kept" equal x "$(cat "$K/x.before")" "$(cat "$X")"
+for h in 7 9 10 11 12 13 14 15 16 17 18 19 20; do rm -f "$K/vsub-dead-203.0.113.$h"; done
+# too little memory: no check started
+printf 'MemTotal: 131072 kB\nMemAvailable: 20480 kB\n' > "$K/meminfo-low"
+export SB_MEMINFO=$K/meminfo-low; sb_k vless sub set --conf "$K/sub.plain"; unset SB_MEMINFO
+check "vsub low memory: stops"       has x "$K/out" "мало свободной памяти (20 МБ)"
+check "vsub low memory: nothing changed" equal x "$(cat "$K/x.before")" "$(cat "$X")"
+rm -f "$K/xray-refuse-203.0.113.8"; : > "$K/xray.log"; sb_k vless sub set --conf "$K/sub"
+check "vsub: a batch of 10"          has x "$K/xray.log" "batch 10"
+check "vsub: never more than 10"     hasnt x "$K/xray.log" "batch 20"
+printf 'MemTotal: 131072 kB\nMemAvailable: 40960 kB\n' > "$K/meminfo-low"; : > "$K/xray.log"
+export SB_MEMINFO=$K/meminfo-low; sb_k vless sub set --conf "$K/sub"; unset SB_MEMINFO
+check "vsub less memory: batches of 5" has x "$K/xray.log" "batch 5"
+check "vsub less memory: never 20"   hasnt x "$K/xray.log" "batch 20"
+touch "$K/xray-refuse-203.0.113.8"
+# the recheck: one key died -> out; fewer than 3 alive -> the subscription again (the saved list when it does not answer)
+cp "$X" "$K/x.before"
+touch "$K/vsub-dead-203.0.113.19"; sb_k vless sub check
+check "vsub check: exit 0"           equal x "$RC" 0
+check "vsub check: one died"         has x "$K/out" "Итог: живы 7 из 8"
+check "vsub check: removed from Xray" hasnt x "$X" '"tag": "vless-8"'
+check "vsub check: 7 left"           equal x "$(wc -l < "$P" | tr -d ' ')" 7
+check "vsub check: the dead one out" hasnt x "$P" "@203.0.113.19:"
+for h in 20 18 17 16 15; do touch "$K/vsub-dead-203.0.113.$h"; done
+touch "$K/sub-down"; : > "$K/curl.log"; sb_k vless sub check auto
+check "vsub refill: again"           has x "$K/out" "прохожу подписку заново"
+check "vsub refill: the saved list"  has x "$K/out" "беру список ключей, сохранённый при прошлой проверке"
+check "vsub refill: checked"         has x "$K/out" "Итог: проверено 20 из 20"
+check "vsub refill: kept the living" equal x "$(wc -l < "$P" | tr -d ' ')" 6
+check "vsub refill: told the owner"  has x "$K/curl.log" "прошёл подписку заново"
+check "vsub refill: no UUID sent"    hasnt x "$K/curl.log" "1f1e2d3c"
+rm -f "$K/sub-down"
+# the daily job: nothing before a day has passed
+n0=$(wc -l < "$K/var/log/switchback.log"); sh "$J"
+check "vsub job: not yet"            equal x "$(wc -l < "$K/var/log/switchback.log")" "$n0"
+# the bot: the address as text (not a site: a token), asked first, checked, the message deleted
+SL='\/'
+printf '{"ok":true,"result":[{"update_id":501,"message":{"message_id":88,"chat":{"id":-100},"text":"https:%s%ssub.example.net%sapi%ssub%s%s"}}]}\n' "$SL" "$SL" "$SL" "$SL" "$SL" "$SUBTOK" > "$K/updates"
+bot1
+check "bot vsub: recognised"         has x "$K/curl.log" "Похоже на ссылку на подписку VLESS"
+check "bot vsub: message deleted"    has x "$K/curl.log" "deleteMessage -d chat_id=-100 -d message_id=88"
+check "bot vsub: check button"       has x "$K/curl.log" '"callback_data":"vsub go"'
+check "bot vsub: kept for the check" has x "$K/var/sb-bot/vsub-in" "$SUBURL"
+check "bot vsub: not repeated"       hasnt x "$K/curl.log" "$SUBTOK"
+check "bot vsub: not logged"         hasnt x "$K/var/sb-bot/log" "$SUBTOK"
+botmsg "/vsub go" "yes"; bot1
+check "bot vsub: asks first"         has x "$K/curl.log" "Проверить ключи подписки на роутере"
+check "bot vsub: result sent"        has x "$K/curl.log" "Итог: проверено"
+check "bot vsub: wiped"              missing x "$K/var/sb-bot/vsub-job"
+check "bot vsub: nothing waiting"    missing x "$K/var/sb-bot/vsub-in"
+check "bot vsub: no UUID sent"       hasnt x "$K/curl.log" "1f1e2d3c"
+# a .txt file with a list: the same question; one link in a file: set at once as before
+cp "$K/sub.plain" "$K/tg-file"; botdoc "keys.txt"; bot1
+check "bot vsub file: a list"        has x "$K/curl.log" "Получил файл со списком ключей"
+check "bot vsub file: kept"          exists x "$K/var/sb-bot/vsub-in"
+botmsg "/vsub drop"; bot1
+check "bot vsub file: dropped"       missing x "$K/var/sb-bot/vsub-in"
+# /vless: the recheck button; /vless check
+botmsg "/vless"; bot1
+check "bot /vless: recheck button"   has x "$K/curl.log" '"callback_data":"vsub check"'
+check "bot /vless: names"            has x "$K/curl.log" "ключи подписки:"
+botmsg "/vless check"; bot1
+check "bot /vless check: result"     has x "$K/curl.log" "Итог: живы"
+# off: everything of the subscription goes
+sb_k vless off
+check "vsub off: address gone"       missing x "$K/etc/switchback/vless.sub"
+check "vsub off: list gone"          missing x "$K/etc/switchback/vless.list"
+check "vsub off: pool gone"          missing x "$P"
+check "vsub off: job gone"           missing x "$J"
+check "vsub off: journal clean"      hasnt x "$K/etc/switchback/state" "sb-vless-sub"
+unset SB_XRAY_WAIT SB_IPT SB_IPSET VSUB_SHUFFLE
+openwrt vsub-owrt
+printf '%s\n' "$SUBURL" > "$R/sub"; sb_o vless sub set --conf "$R/sub"
+check "openwrt vsub: refused"        has x "$R/out" "только на Keenetic"
+
+# ---------- every WireGuard tunnel dead: Telegram, Meta and the VPN sites through VLESS for a while ("vless sos") ---------- [vsub]
+keenetic vsos
+printf 'profile=custom\nmodules=vpn watchdog failover\nvpn_iface=Wireguard0\nfailover_tunnels=Wireguard0 Wireguard1\nbot_token=%s\nbot_chat=-100\n' "$TOKEN" > "$K/a"
+sb_k install --answers "$K/a"
+check "vsos: base install"           equal x "$RC" 0
+export SB_XRAY_WAIT=0 SB_IPT=$K/bin/fipt SB_IPSET=$K/bin/fipset
+printf '#!/bin/sh\necho "iptables $*" >> "$SB_OPT/ipt.log"\ncase " $* " in *" -C "*|*" -D "*) exit 1 ;; esac\nexit 0\n' > "$K/bin/fipt"
+printf '#!/bin/sh\necho "ipset $*" >> "$SB_OPT/ipt.log"\n[ "$2" = restore ] && cat >> "$SB_OPT/ipt.log"\nexit 0\n' > "$K/bin/fipset"
+chmod +x "$K/bin/fipt" "$K/bin/fipset"
+printf 'vless://%s@203.0.113.80:443?security=reality&sni=www.example.com&pbk=%s&sid=6ba85179e30d4fc2&type=tcp&flow=xtls-rprx-vision\n' \
+  0f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b TestPublicKeyOnlyForTests_abcdefghijklmnopq > "$K/link"
+sb_k vless set --conf "$K/link"
+check "vsos: VLESS set"              equal x "$RC" 0
+echo "vpn site.example" >> "$K/etc/switchback/sites"; printf '10.7.7.7\n' > "$K/dns-site.example"
+echo "zapret other.example" >> "$K/etc/switchback/sites"; printf '10.7.7.8\n' > "$K/dns-other.example"
+sed -i 's/^DEAD_RUNS=.*/DEAD_RUNS=1/; s/^UP_WAIT=.*/UP_WAIT=5/' "$K/etc/switchback/failover.conf"
+FO=$K/etc/cron.1min/wg-failover; VI=$K/etc/switchback/vless.ips
+fo() { SB_OPT=$K SB_TEST=1 SB_PLATFORM=keenetic "$SH" "$FO" "$@" > "$K/fo.out" 2>&1; }
+# normal times: nothing but the AI services may use VLESS
+fo
+check "vsos: healthy: nothing to VLESS" hasnt x "$VI" "sos:"
+# every tunnel dead -> Telegram, Meta and the VPN site to VLESS, the owner told with a button
+touch "$K/wg-dead-Wireguard0"; : > "$K/curl.log"; : > "$K/ipt.log"; fo
+check "vsos on: Telegram"            has x "$VI" "91.108.56.0/22 sos:telegram"
+check "vsos on: Meta"                has x "$VI" "sos:instagram"
+check "vsos on: the VPN site"        has x "$VI" "10.7.7.7/32 sos:site.example"
+check "vsos on: not other sites"     hasnt x "$VI" "10.7.7.8"
+check "vsos on: the set filled"      has x "$K/ipt.log" "add sb-vless-new 91.108.56.0/22"
+check "vsos on: redirected"          has x "$K/ipt.log" "-I PREROUTING -p tcp -m set --match-set sb-vless dst"
+check "vsos on: marked"              exists x "$K/etc/switchback/vless.sos"
+check "vsos on: told"                has x "$K/curl.log" "Ни один туннель WireGuard не отвечает. Временно пустил через VLESS"
+check "vsos on: the no button"       has x "$K/curl.log" '"callback_data":"vsos no"'
+check "vsos on: button text"         has x "$K/curl.log" "Не надо, оставить как есть"
+check "vsos on: no 'nothing works' alarm" hasnt x "$K/curl.log" "Telegram и Instagram сейчас не работают"
+check "vsos on: logged"              has x "$K/var/wg-failover/log" "every tunnel dead: Telegram, Meta and VPN sites through VLESS"
+check "vsos on: the site not named"  hasnt x "$K/curl.log" "site.example"
+sb_k vless status
+check "vsos status: said"            has x "$K/out" "временно идут через VLESS"
+# still dead: told once only
+rm -f "$K/var/wg-failover/last_try"; : > "$K/curl.log"; fo
+check "vsos on: told once"           hasnt x "$K/curl.log" "Временно пустил"
+check "vsos on: still on"            has x "$VI" "sos:telegram"
+# the tunnel is back but Telegram through it goes into Xray (dead) while VLESS holds it (21.11.2026): Google's 204
+rm -f "$K/wg-dead-Wireguard0"; touch "$K/site-novpn-api.telegram.org"; fo
+check "vsos, Telegram held by Xray: back" hasnt x "$VI" "sos:"
+touch "$K/wg-dead-Wireguard0"; rm -f "$K/site-novpn-api.telegram.org" "$K/var/wg-failover/last_try" "$K/var/wg-failover/last_switch" "$K/var/wg-failover/nostandby.sent"; fo
+check "vsos on again"                has x "$VI" "sos:telegram"
+# a tunnel answers again -> all back on WireGuard by itself, the owner told
+rm -f "$K/wg-dead-Wireguard0"; : > "$K/curl.log"; fo
+check "vsos back: out of VLESS"      hasnt x "$VI" "sos:"
+check "vsos back: mark gone"         missing x "$K/etc/switchback/vless.sos"
+check "vsos back: told"              has x "$K/curl.log" "Туннель WireGuard снова работает"
+check "vsos back: logged"            has x "$K/var/wg-failover/log" "a tunnel works again"
+# a standby answering is a way back too
+touch "$K/wg-dead-Wireguard0"; rm -f "$K/var/wg-failover/last_try" "$K/var/wg-failover/last_switch" "$K/var/wg-failover/nostandby.sent"; fo
+check "vsos again: on"               has x "$VI" "sos:telegram"
+touch "$K/wg-alive-Wireguard1"; rm -f "$K/var/wg-failover/last_try"; : > "$K/curl.log"; fo
+check "vsos switch: moved to the standby" has x "$K/var/wg-failover/log" "SWITCHED Wireguard0"
+check "vsos switch: back from VLESS" hasnt x "$VI" "sos:"
+check "vsos switch: told"            has x "$K/curl.log" "Туннель WireGuard снова работает"
+# the owner says no: back from VLESS and not again until a tunnel has answered
+rm -f "$K/wg-alive-Wireguard1" "$K/var/wg-failover/last_try" "$K/var/wg-failover/last_switch" "$K/var/wg-failover/nostandby.sent"; fo
+check "vsos no: on first"            has x "$VI" "sos:telegram"
+botmsg "/vsos no"; bot1
+check "vsos no: out of VLESS"        hasnt x "$VI" "sos:"
+check "vsos no: answered"            has x "$K/curl.log" "пока туннель WireGuard не оживёт, сам не включу"
+check "vsos no: remembered"          exists x "$K/etc/switchback/vless.sos.no"
+rm -f "$K/var/wg-failover/last_try"; fo
+check "vsos no: not again while dead" hasnt x "$VI" "sos:"
+rm -f "$K/wg-dead-Wireguard0"; fo
+check "vsos no: forgotten once a tunnel works" missing x "$K/etc/switchback/vless.sos.no"
+# off and uninstall take it all
+touch "$K/wg-dead-Wireguard0"; rm -f "$K/var/wg-failover/last_try" "$K/var/wg-failover/last_switch" "$K/var/wg-failover/nostandby.sent"; fo
+check "vsos: on before off"          exists x "$K/etc/switchback/vless.sos"
+sb_k vless off
+check "vsos off: mark gone"          missing x "$K/etc/switchback/vless.sos"
+rm -f "$K/var/wg-failover/last_try"; fo
+check "vsos off: no VLESS, nothing to send" missing x "$K/etc/switchback/vless.sos"
+unset SB_XRAY_WAIT SB_IPT SB_IPSET
+
+# ---------- a subscription's keys that open slowly: the first request through a key is its connection ---------- [vsub]
+# (20.11.2026, on the router: TLS + grpc or ws on one core takes 3-8 s the first time, 1-3 s after; a short limit on
+# the first request found 1 of 518 alive)
+keenetic vsubslow
+printf 'profile=custom\nmodules=zapret vpn watchdog\nvpn_iface=Wireguard0\n' > "$K/a"
+sb_k install --answers "$K/a"
+check "vsub slow: base install"      equal x "$RC" 0
+export SB_XRAY_WAIT=0 SB_IPT=$K/bin/fipt SB_IPSET=$K/bin/fipset VSUB_SHUFFLE=0
+printf '#!/bin/sh\necho "iptables $*" >> "$SB_OPT/ipt.log"\ncase " $* " in *" -C "*|*" -D "*) exit 1 ;; esac\nexit 0\n' > "$K/bin/fipt"
+printf '#!/bin/sh\necho "ipset $*" >> "$SB_OPT/ipt.log"\n[ "$2" = restore ] && cat >> "$SB_OPT/ipt.log"\nexit 0\n' > "$K/bin/fipset"
+chmod +x "$K/bin/fipt" "$K/bin/fipset"
+{ i=1; while [ $i -le 6 ]; do key $i; i=$((i+1)); done; } > "$K/sub.plain"
+# the first request: 7.5, 3, 12, 19 s (alive), 25 s (more than the warm-up allows: dead); .6 quick
+echo 7.5 > "$K/vsub-slow-203.0.113.1"; echo 3.0 > "$K/vsub-slow-203.0.113.2"; echo 12.0 > "$K/vsub-slow-203.0.113.3"
+echo 19.0 > "$K/vsub-slow-203.0.113.4"; echo 25.0 > "$K/vsub-slow-203.0.113.5"
+i=1; while [ $i -le 6 ]; do printf '0.%03d\n' $((200 + i * 30)) > "$K/vsub-ms-203.0.113.$i"; i=$((i+1)); done
+# nice where there is one: the check's Xray and curl at the lowest priority
+printf '#!/bin/sh\necho "nice $*" >> "$SB_OPT/nice.log"\nshift 2\nexec "$@"\n' > "$K/bin/nice"; chmod +x "$K/bin/nice"   # $OPT/bin is on PATH
+P=$K/etc/switchback/vless.pool; : > "$K/curl.log"; : > "$K/xray.log"
+sb_k vless sub set --conf "$K/sub.plain"
+check "vsub slow: exit 0"            equal x "$RC" 0
+check "vsub slow: slow ones alive"   has x "$K/out" "живые 5, Claude открывается через 5, ChatGPT через 5, Telegram через 5, подходят 5"
+check "vsub slow: kept, 12 s the first time" has x "$P" "@203.0.113.3:"
+check "vsub slow: kept, 19 s the first time" has x "$P" "@203.0.113.4:"
+check "vsub slow: more than 20 s: dead" hasnt x "$P" "@203.0.113.5:"
+check "vsub slow: delay by the next request" equal x "$(cut -f1 "$P" | tr '\n' ' ')" "230 260 290 320 380 "
+check "vsub slow: first request has time" has x "$K/curl.log" "--connect-timeout 15 --max-time 20 -w %{http_code} %{time_total} %{size_download} --socks5-hostname 127.0.0.1:10821 https://www.gstatic.com/generate_204"
+check "vsub slow: then the usual limits" has x "$K/curl.log" "--connect-timeout 6 --max-time 8 -w %{http_code} %{time_total} %{size_download} --socks5-hostname 127.0.0.1:10821 https://www.gstatic.com/generate_204"
+check "vsub slow: sites by HEAD"     has x "$K/curl.log" "-I --connect-timeout 6 --max-time 12 -w %{http_code} %{time_total} %{size_download} --socks5-hostname 127.0.0.1:10821 https://claude.ai/"
+check "vsub slow: two at once, at most 10 a batch" has x "$K/xray.log" "batch 6"
+check "vsub slow: curl at the lowest priority" has x "$K/nice.log" "nice -n 19 curl -s -o /dev/null"
+check "vsub slow: Xray at the lowest priority" has x "$K/nice.log" "xray run -c $SB_TMP/switchback-vsub."
+check "vsub slow: the working Xray not niced" hasnt x "$K/nice.log" "xray.json"
+# a nice that does not work: the check runs without it
+printf '#!/bin/sh\necho "nice $*" >> "$SB_OPT/nice.log"\nexit 1\n' > "$K/bin/nice"; : > "$K/nice.log"
+sb_k vless sub set --conf "$K/sub.plain"
+check "vsub no nice: still checked"  has x "$K/out" "подходят 5"
+check "vsub no nice: tried once"     equal x "$(cat "$K/nice.log")" "nice -n 19 true"
+unset SB_XRAY_WAIT SB_IPT SB_IPSET VSUB_SHUFFLE
+
+# ---------- the list of the best keys must reach Xray whole; when Xray refuses, why (20.11.2026, on the router) ---------- [vsub]
+keenetic vsubpool
+printf 'profile=custom\nmodules=zapret vpn watchdog\nvpn_iface=Wireguard0\n' > "$K/a"
+sb_k install --answers "$K/a"
+check "vsub pool: base install"      equal x "$RC" 0
+export SB_XRAY_WAIT=0 SB_IPT=$K/bin/fipt SB_IPSET=$K/bin/fipset VSUB_SHUFFLE=0
+printf '#!/bin/sh\necho "iptables $*" >> "$SB_OPT/ipt.log"\ncase " $* " in *" -C "*|*" -D "*) exit 1 ;; esac\nexit 0\n' > "$K/bin/fipt"
+printf '#!/bin/sh\necho "ipset $*" >> "$SB_OPT/ipt.log"\n[ "$2" = restore ] && cat >> "$SB_OPT/ipt.log"\nexit 0\n' > "$K/bin/fipset"
+chmod +x "$K/bin/fipt" "$K/bin/fipset"
+# names with a tab, a new line, a zero byte, a DEL, a flag
+{ key 1 "a%09b"; key 2 "a%0Ab"; key 3 "a%00b"; key 4 "a%7Fb"; key 5 "%F0%9F%87%A9%F0%9F%87%AA%20DE"; } > "$K/sub.plain"
+P=$K/etc/switchback/vless.pool; X=$K/etc/switchback/xray.json
+sb_k vless sub set --conf "$K/sub.plain"
+check "vsub pool: odd names: kept"   has x "$K/out" "оставлены лучшие 5"
+check "vsub pool: one line a key"    equal x "$(wc -l < "$P" | tr -d ' ')" 5
+check "vsub pool: five fields each"  equal x "$(awk -F'\t' '{printf "%d", NF}' "$P")" 55555
+check "vsub pool: the link last"     equal x "$(awk -F'\t' '$NF ~ /^vless:\/\// {n++} END {print n}' "$P")" 5
+check "vsub pool: no control bytes in names" equal x "$(cut -f4 "$P" | tr -d '\n' | LC_ALL=C tr -d '[:print:]\200-\377' | wc -c | tr -d ' ')" 0
+check "vsub pool: tab name"          equal x "$(sed -n 1p "$P" | cut -f4)" ab
+check "vsub pool: Xray got them all" equal x "$(grep -c '"protocol": "vless"' "$X")" 5
+# Xray refuses the balancer: its reason shown and logged, masked; nothing kept, the old settings stay
+cp "$X" "$K/x.before"; touch "$K/xray-refuse-pool"
+sb_k vless sub set --conf "$K/sub.plain"
+check "vsub refused: said"           has x "$K/out" "Xray не принял настройки с ключами подписки — рабочие настройки не тронуты"
+check "vsub refused: Xray's reason"  has x "$K/out" "Xray: Failed to start: main: failed to load config files: [CONF] > infra/conf: failed to build outbound config with tag vless-3 > address ADDR (HOST) id UUID pbk KEY: invalid"
+check "vsub refused: no address"     hasnt x "$K/out" "203.0.113.19"
+check "vsub refused: no UUID"        hasnt x "$K/out" "1f1e2d3c"
+check "vsub refused: no key"         hasnt x "$K/out" "TestPublicKey"
+check "vsub refused: no name"        hasnt x "$K/out" "cdn.example.net"
+L=$K/var/log/switchback.log
+check "vsub refused: logged with the count" has x "$L" "vless: xray -test refused (pool, outbounds 5): Failed to start"
+check "vsub refused: log masked"     hasnt x "$L" "1f1e2d3c"
+check "vsub refused: nothing kept"   has x "$K/out" "оставлено 0"
+check "vsub refused: not 'none fit'" hasnt x "$K/out" "подходящих ключей нет"
+check "vsub refused: the old ones kept" has x "$K/out" "прежние ключи оставлены"
+check "vsub refused: settings kept"  equal x "$(cat "$K/x.before")" "$(cat "$X")"
+check "vsub refused: no temp left"   missing x "$X.new.err"
+rm -f "$K/xray-refuse-pool"
+# a list of the best without a single link (it broke on its way): said so, not blamed on Xray
+mkdir -p "$K/gw"; printf '230\t6.0\tsni.example\t-\n260\t0\tsni.example\tDE\n' > "$K/gw/pool"
+gp=$(SB_TEST=1 "$SH" -c ". '$SRC/lib/common.sh'; . '$SRC/lib/vless.sh'; . '$SRC/lib/vsub.sh'; W='$K/gw'; LOG='$K/gw/log'; vsub_apply; echo rc=\$?" 2>&1)
+echo "$gp" > "$K/gw/out"
+check "vsub empty pool: said"        has x "$K/gw/out" "не собрал список лучших ключей"
+check "vsub empty pool: not Xray"    hasnt x "$K/gw/out" "Xray не принял"
+check "vsub empty pool: failed"      has x "$K/gw/out" "rc=1"
+check "vsub empty pool: its shape logged" has x "$K/gw/log" "the pool has no key to parse: lines 2, fields 4/4, vless:// last 0"
+unset SB_XRAY_WAIT SB_IPT SB_IPSET VSUB_SHUFFLE
+
+# ========== the result ==========
 echo ""
 echo "Тесты: прошло $PASS, не прошло $FAILED  (оболочка: $SH)"
 [ "$FAILED" = 0 ] && rm -rf "$WORK" || echo "Файлы упавших проверок: $WORK"

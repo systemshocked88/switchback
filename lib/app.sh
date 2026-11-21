@@ -56,6 +56,7 @@ refresh_scripts() {
   fi
   if [ -n "$CRON1" ] && [ -f "$CRON1/ai-path" ] && ours "$CRON1/ai-path"; then
     ai_job > "$tmp"; refresh_file "$CRON1/ai-path" "резерв для нейросетей" "$tmp"
+    ai_subs_off all; save_if_changed   # what a version of 20.11.2026 added (lib/ai.sh: it broke the router's DNS)
   fi
   # the router's own connections past zapret (own_script): refreshed, or added where zapret runs and this
   # version is the first to know about the leak
@@ -64,6 +65,16 @@ refresh_scripts() {
     if own_can_run; then "$OWN_HOOK" >/dev/null 2>&1; fi
   elif [ -n "$OWN_HOOK" ] && pf_zapret_installed && [ -s "$STATE" ]; then
     own_install
+  fi
+  # VLESS (lib/vless.sh): its service and its rules
+  if [ -n "$VLESS_HOOK" ] && [ -f "$VLESS_INIT" ] && ours "$VLESS_INIT"; then
+    vless_init_script > "$tmp"; refresh_file "$VLESS_INIT" "служба Xray" "$tmp"
+  fi
+  if [ -n "$VLESS_HOOK" ] && [ -f "$VLESS_HOOK" ] && ours "$VLESS_HOOK"; then
+    vless_hook_script > "$tmp"; refresh_file "$VLESS_HOOK" "правила VLESS" "$tmp"; vless_sync
+  fi
+  if [ -n "$VSUB_JOB" ] && [ -f "$VSUB_JOB" ] && ours "$VSUB_JOB"; then
+    vsub_job > "$tmp"; refresh_file "$VSUB_JOB" "перепроверка ключей подписки VLESS" "$tmp"
   fi
   if [ -n "$CRON1" ] && [ -f "$CRON1/sb-panel" ] && ours "$CRON1/sb-panel"; then
     panel_job > "$tmp"; refresh_file "$CRON1/sb-panel" "запуск панели" "$tmp"

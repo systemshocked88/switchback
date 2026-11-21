@@ -72,6 +72,10 @@ do_status() {
     sub "Резерв для нейросетей: Claude, ChatGPT"
     ai_status
   fi
+  if vless_on; then
+    sub "VLESS через Xray"
+    vless_status
+  fi
   if [ -n "$CRON1" ] && [ -x "$CRON1/claude-nodes" ]; then
     sub "Claude: быстрый узел и запрет QUIC"
     ok "автосмена узлов стоит, проверка каждую минуту"

@@ -11,7 +11,7 @@ body:
     id: router
     attributes:
       label: Модель роутера и версия switchback
-      placeholder: "например: Keenetic Extra KN-1710, switchback 0.7.6"
+      placeholder: "например: Keenetic Extra KN-1710, switchback 0.7.7"
     validations:
       required: true
   - type: textarea

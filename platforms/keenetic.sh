@@ -15,6 +15,7 @@ CRON1=$OPT/etc/cron.1min
 OWN_HOOK=$OPT/etc/ndm/netfilter.d/101-switchback-own.sh   # after 100-nfqws2.sh: the router's own connections go past zapret
 QUIC_HOOK=$OPT/etc/ndm/netfilter.d/102-switchback-noquic.sh   # devices at home do not use QUIC (the rule comes back after a firewall rebuild)
 pf_noquic_on() { quic_hook_install; }
+VLESS_HOOK=$OPT/etc/ndm/netfilter.d/103-switchback-vless.sh   # chosen addresses -> Xray (lib/vless.sh)
 SCRIPT_PATH=$OPT/sbin:$OPT/bin:/usr/sbin:/usr/bin:/sbin:/bin   # PATH of the scripts switchback installs
 DNS_LIMIT=8
 DNS_REPLACE=1      # mod_dns may move a domain to another DoT server (pf_dns_srv_of + pf_dns_del + pf_dns_add)
@@ -193,6 +194,7 @@ pf_vpn_alive() {   # connected and a handshake with the server in the last 5 min
   case $h in ''|*[!0-9]*) return 1 ;; esac
   [ "$h" -lt 300 ]
 }
+pf_vpn_on() { ndmc -c "show interface $1" 2>/dev/null | grep -q 'connected: yes'; }   # switched on (alive or not)
 pf_route_add()     { ndm "ip route $1 $2 $3 auto"; }
 pf_route_del()     { ndm "no ip route $1 $2 $3"; }
 
@@ -294,6 +296,11 @@ fo_hs() {    # seconds since the last handshake, 99999 if none / tunnel down
 fo_desc()    { ndmc -c "show interface $1" 2>/dev/null | awk '/description:/ {print $2; exit}'; }
 fo_works() { # a request bound to that tunnel reaches Telegram (a handshake alone proves nothing)
   c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 --interface "nwg${1#Wireguard}" https://api.telegram.org/)
+  [ -n "$c" ] && [ "$c" != "000" ] && return 0
+  # while VLESS holds Telegram ("vless sos") the router's own request to it goes into Xray, bound tunnel or not:
+  # 21.11.2026 Xray was dead, the live tunnel looked dead too and VLESS never let go. Then Google's 204 (not in VLESS)
+  [ -f "$SOS" ] || return 1
+  c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 --interface "nwg${1#Wireguard}" https://www.gstatic.com/generate_204)
   [ -n "$c" ] && [ "$c" != "000" ]
 }
 fo_was_on()  { echo "$CFG" | sed -n "/^interface $1\$/,/^!/p" | grep -qE '^[[:space:]]+up$'; }
@@ -345,6 +352,10 @@ pf_host_pin() {     # pf_host_pin DOMAIN IP: the router's DNS answers IP for DOM
   remember "host $1 ${old:--}"
 }
 pf_host_restore() { ndm "no ip host $1"; [ "$2" = - ] || ndm "ip host $1 $2"; }
+pf_host_pins()    { rc_load; printf '%s\n' "$RC" | awk '$1=="ip" && $2=="host" {print $3, $4}'; }   # every pin now: NAME IP
+# pf_dns_doh DOMAIN: "URL IP" to ask the domain's DNS service past the router's pins: its DoT server's name over
+# DoH (the services give both on one address), connected by the DoT server's IP
+pf_dns_doh() { printf '%s\n' "$RC" | awk -v d="$1" '$1=="tls" && $2=="upstream" && $4=="sni" && $6=="domain" && $7==d {print "https://" $5 "/dns-query", $3; exit}'; }
 
 # platform part of the installed claude-nodes script (see lib/nodes.sh)
 pf_nodes_funcs() {

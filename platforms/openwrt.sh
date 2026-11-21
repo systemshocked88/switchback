@@ -14,6 +14,7 @@ CRONW=$ETC_DIR/switchback/cronw
 CRON1=$ETC_DIR/switchback/cron1   # run every minute by one crontab line
 OWN_HOOK=""                        # the kernel leak behind it was seen on Keenetic only
 QUIC_HOOK=""                       # "no QUIC" is a firewall rule here (pf_noquic_on), not a hook
+VLESS_HOOK=""                      # VLESS through Xray (lib/vless.sh): Keenetic only for now
 pf_noquic_on() {   # lan -> wan, UDP 443, reject (undo: the uci journal)
   s=firewall.sb_noquic
   uci -q get "$s" >/dev/null && return 0
@@ -501,6 +502,14 @@ pf_host_restore() {
   for v in $(dns_addr | awk -F/ -v d="$1" '$2 == d'); do run uci del_list "dhcp.@dnsmasq[0].address=$v"; done
   [ "$2" = - ] || run uci add_list "dhcp.@dnsmasq[0].address=/$1/$2"
   DNS_CHANGED=1
+}
+pf_host_pins() { dns_addr | awk -F/ 'NF >= 3 {print $2, $3}'; }   # every pin: NAME IP
+# pf_dns_doh DOMAIN: the DoH address of the domain's DNS service (https-dns-proxy's resolver_url for its port)
+pf_dns_doh() {
+  _dd=$(pf_dns_srv_of "$1"); _dd=${_dd#*#}; [ -n "$_dd" ] || return 0
+  uci show https-dns-proxy 2>/dev/null | awk -v p="$_dd" '{ k = $0; sub(/=.*/, "", k); v = $0; sub(/^[^=]*=/, "", v); gsub(/\047/, "", v)
+      n = split(k, a, "."); if (a[n] == "listen_port" && v == p) s = a[2]; if (a[n] == "resolver_url") u[a[2]] = v }
+    END { if (s != "" && u[s] != "") print u[s] }'
 }
 
 pf_nodes_funcs() {

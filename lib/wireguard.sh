@@ -100,7 +100,8 @@ wg_traffic_check() {
 # Each server becomes a standby tunnel, is switched on for a moment and checked with real traffic (Telegram
 # through it only); the ones that pass stay (off, at the end of the failover list), the rest are removed at
 # once. The archives are taken in turns (one server from each, then the next ones), so the working tunnels
-# come from different slots and countries; a server already on the router (same address) is skipped.
+# come from different slots and countries. A server already on the router (same address) is skipped while its
+# tunnel works; a dead one (judged as the failover does) is checked anew: revived - back in the failover list.
 # Keys are never shown; the unpacked copies are wiped at the end (and the given files too with SB_ANSWERS_RM=1).
 WGB_KEEP=6          # working tunnels added in one run at most
 WGB_CAP=20          # WireGuard connections on the router at most
@@ -127,6 +128,37 @@ wgb_works() {   # a handshake, then Telegram through this tunnel only
   c=$(curl -s -o /dev/null --max-time 12 --interface "$(pf_wg_dev "$1")" -w '%{http_code}' https://api.telegram.org 2>/dev/null)
   [ -n "$c" ] && [ "$c" != 000 ]
 }
+# wgb_existing HOST: the tunnel on the router that goes to this server (its endpoint or switchback's description)
+wgb_existing() {
+  printf '%s\n' "$RC" | awk -v h="$1" '
+    /^interface / { i = $2; next }
+    /^[^ ]/ { i = "" }
+    i != "" && (index($0, "endpoint " h ":") || $0 ~ ("description switchback-" h "$")) { print i; exit }'
+}
+# wgb_dead NAME: the tunnel does not work now, judged as the failover does: no fresh handshake now, and the last
+# daily check of the standbys (wg-failover/standby, "live" line) did not find it answering either. A standby
+# that answered then and is simply switched off now is not dead.
+wgb_dead() {
+  pf_vpn_alive "$1" && return 1
+  sed -n 's/^live//p' "$VAR_DIR/wg-failover/standby" 2>/dev/null | tr ' ' '\n' | grep -qx "$1" && return 1
+  return 0
+}
+# wgb_recheck NAME HOST: a dead tunnel already on the router, given again in the files: checked anew the same way
+# as a new one (on for a moment, alone). Revived: kept, back in the failover list. Still dead: left as it is -
+# removing a tunnel is the owner's decision. $rechecked, $revived_n, $revived
+wgb_recheck() {
+  rechecked=$((rechecked+1))
+  ron=0; pf_vpn_on "$1" && ron=1                 # on already (the active one, say): not switched off after
+  [ "$ron" = 1 ] || pf_wg_up "$1" >/dev/null 2>&1
+  if wgb_works "$1"; then
+    [ "$ron" = 1 ] || pf_wg_down "$1" >/dev/null 2>&1
+    revived_n=$((revived_n+1)); revived="$revived $1"
+    ok "$1 ($2) — был мёртв, снова работает: оставлен запасным"; ev wg_batch revived "$1" "$2"
+  else
+    [ "$ron" = 1 ] || pf_wg_down "$1" >/dev/null 2>&1
+    skip "$1 ($2) — уже на роутере и по-прежнему не отвечает (не удаляю)"; ev wg_batch still_dead "$1" "$2"
+  fi
+}
 wgb_wipe() { rm -rf "$WGB_DIR"; [ "$SB_ANSWERS_RM" = 1 ] && [ -n "$CONF" ] && rm -rf "$CONF"; }
 
 do_wg_batch() {
@@ -134,7 +166,7 @@ do_wg_batch() {
   [ "$PLATFORM" = keenetic ] || { bad "пока только для Keenetic: на OpenWrt добавляйте по одному (wg-import)"; exit 2; }
   [ -n "$CONF" ] && [ -e "$CONF" ] || { bad "нужен архив, файл или папка: install.sh wg-batch --conf ПУТЬ"; exit 2; }
   keep=${WG_KEEP:-$WGB_KEEP}; case $keep in ''|*[!0-9]*) keep=$WGB_KEEP ;; esac
-  WGB_DIR=/tmp/switchback-wgb.$$; rm -rf "$WGB_DIR"; mkdir -p "$WGB_DIR/x"; chmod 700 "$WGB_DIR"
+  WGB_DIR=${SB_TMP:-/tmp}/switchback-wgb.$$; rm -rf "$WGB_DIR"; mkdir -p "$WGB_DIR/x"; chmod 700 "$WGB_DIR"
   trap 'r=$?; wgb_wipe; ev end $r' EXIT
   # sources: each .zip is one (a slot); loose .conf files together are one more
   if [ -d "$CONF" ]; then find "$CONF" -type f > "$WGB_DIR/src"; else echo "$CONF" > "$WGB_DIR/src"; fi
@@ -159,7 +191,7 @@ do_wg_batch() {
 
   : > "$RUN_JOURNAL"
   trap on_interrupt INT TERM
-  WGB_USED=""; n=0; good=0; dead=0; dup=0; broken=0; added=""
+  WGB_USED=""; n=0; good=0; dead=0; dup=0; broken=0; added=""; rechecked=0; revived_n=0; revived=""
   while IFS= read -r f <&3; do
     [ "$good" -ge "$keep" ] && break
     [ $((have + good)) -ge "$WGB_CAP" ] && { warn "на роутере уже $((have + good)) подключений WireGuard — больше не добавляю"; break; }
@@ -167,9 +199,15 @@ do_wg_batch() {
     [ $((n % 20)) = 0 ] && say "  …проверено $n из $total, работают $good"
     wg_parse "$f" >/dev/null 2>&1 || { broken=$((broken+1)); continue; }
     wh=$WG_EP_HOST                                  # ("h" is taken: pf_vpn_alive sets it)
-    if grep -qxF "$wh" "$WGB_DIR/hosts" 2>/dev/null || printf '%s\n' "$RC" | grep -qF -e "endpoint $wh:" -e "switchback-$wh"; then
-      dup=$((dup+1)); continue; fi
+    if grep -qxF "$wh" "$WGB_DIR/hosts" 2>/dev/null; then dup=$((dup+1)); continue; fi
     echo "$wh" >> "$WGB_DIR/hosts"
+    if printf '%s\n' "$RC" | grep -qF -e "endpoint $wh:" -e "switchback-$wh"; then
+      # on the router already: a working one is skipped, a dead one is checked anew (seen 2026-11-18: 320 of 351
+      # servers were there already, part of them dead, and sending the archives again changed nothing)
+      en=$(wgb_existing "$wh")
+      if [ -n "$en" ] && wgb_dead "$en"; then wgb_recheck "$en" "$wh"; else dup=$((dup+1)); fi
+      continue
+    fi
     name=$(wgb_free_name)
     [ -n "$name" ] || { warn "нет свободного имени для подключения"; break; }
     WG_STANDBY=1                                    # made switched off: on only for the check
@@ -189,18 +227,22 @@ do_wg_batch() {
   done 3< "$WGB_DIR/order"
   unset WG_PRIV WG_PSK
   trap - INT TERM
-  if [ "$good" -gt 0 ] && [ -f "$SB_DIR/failover.conf" ] && [ "$DRY" != 1 ]; then
-    sed -i "s/^TUNNELS=\"\(.*\)\"\$/TUNNELS=\"\1$added\"/" "$SB_DIR/failover.conf"
-    ok "автосмена: новые туннели добавлены в конец списка запасных"
+  # revived ones back in the failover list, if they dropped out of it
+  back=""; [ -f "$SB_DIR/failover.conf" ] && for t in $revived; do
+    sed -n 's/^TUNNELS="\(.*\)"$/ \1 /p' "$SB_DIR/failover.conf" | grep -qF " $t " || back="$back $t"; done
+  if [ -n "$added$back" ] && [ -f "$SB_DIR/failover.conf" ] && [ "$DRY" != 1 ]; then
+    sed -i "s/^TUNNELS=\"\(.*\)\"\$/TUNNELS=\"\1$added$back\"/" "$SB_DIR/failover.conf"
+    [ -n "$added" ] && ok "автосмена: новые туннели добавлены в конец списка запасных"
+    [ -n "$back" ] && ok "автосмена: ожившие туннели вернулись в список запасных:$back"
   elif [ "$good" -gt 0 ]; then note "автосмены нет: туннели просто добавлены (выключены)"; fi
   pf_save >/dev/null 2>&1; pf_reload
   rm -f "$RUN_JOURNAL"
   say ""
-  say "Итог: проверено $n из $total — работают $good, не работают $dead, повторы $dup, не разобрать $broken."
+  say "Итог: проверено $n из $total — работают $good, не работают $dead, повторы $dup, не разобрать $broken; перепроверено мёртвых $rechecked, ожило $revived_n."
   [ "$n" -lt "$total" ] && [ "$good" -ge "$keep" ] && note "остальные $((total - n)) не проверял: уже набрано $keep рабочих"
-  [ "$good" = 0 ] && note "рабочих не нашлось: провайдер, похоже, глушит эти серверы — возьмите другие страны"
-  ev wg_batch done "$n" "$good" "$dead" "$dup" "$broken"
-  log "wg-batch: checked $n of $total, kept $good:$added, dead $dead, dup $dup, broken $broken"
+  [ "$good" = 0 ] && [ "$revived_n" = 0 ] && note "рабочих не нашлось: провайдер, похоже, глушит эти серверы — возьмите другие страны"
+  ev wg_batch done "$n" "$good" "$dead" "$dup" "$broken" "$rechecked" "$revived_n"
+  log "wg-batch: checked $n of $total, kept $good:$added, dead $dead, dup $dup, broken $broken, dead ones rechecked $rechecked, revived $revived_n:${revived:- none}"
   return 0
 }
 

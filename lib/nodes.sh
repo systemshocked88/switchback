@@ -94,12 +94,17 @@ GROUPS="web:claude.ai,claudeusercontent.com api:api.anthropic.com,a-api.anthropi
 PROBE=claude.com; SLOW=300; SLOW_RUNS=5; DEAD_RUNS=3; GAIN=2; RETRY=15; EXTRA_DOH=""; OWN=""
 [ -f __CONF__/nodes.conf ] && . __CONF__/nodes.conf
 # the AI reserve (lib/ai.sh) moved a group to another path (Zapret DNS, a spare address, VPN): its pins are the
-# reserve's then, and moving them to the DNS service's nodes would undo it. ai_away GROUP (web, api, gpt)
+# reserve's then, and moving them to the DNS service's nodes would undo it. ai_away GROUP (web, api, gpt); also
+# while the reserve is switching (its lock): a switch takes minutes, "cur" changes at its end, and a scan started
+# meanwhile re-pinned the names over the reserve's (19.11.2026)
 ai_away() {
   case $1 in gpt) a=gpt ;; *) a=claude ;; esac
+  [ -f __CONF__/ai.conf ] || return 1
+  [ -d __STATE__/ai-path/busy ] && return 0
   c=$(cat __STATE__/ai-path/cur.$a 2>/dev/null)
-  [ -f __CONF__/ai.conf ] && [ -n "$c" ] && [ "$c" != dns ]
+  [ -n "$c" ] && [ "$c" != dns ]
 }
+ai_held() { if [ -d __STATE__/ai-path/busy ]; then echo switching; else cat __STATE__/ai-path/cur.$a 2>/dev/null; fi; }
 S=__STATE__/claude-nodes
 LOG=$S/log
 BOT=__BOT__
@@ -234,10 +239,26 @@ group() {   # group NAME "DOMAINS" (the first domain is measured)
     return
   fi
   [ $DRY = 1 ] && { echo "WOULD SWITCH $name: $cur (${ms}ms) -> $best (${bestms}ms)"; return; }
+  # the scan takes a minute or two: the AI reserve may have taken the group meanwhile
+  if ai_away "$name"; then log "$name: the AI reserve took it during the scan ($(ai_held)), skip"; return; fi
   for d in $domains; do nd_pin "$d" "$best"; done
+  # a dead node: every other pin on it goes too (pinned by hand: 18.11.2026 eight names were left on a dead node),
+  # except the names the AI reserve holds now; their "before" value in its journal changes instead
+  moved=0
+  if [ "$kind" = dead ]; then
+    held=__STATE__/ai-path/pinned
+    moved=$(nd_pins | while read -r n ip; do
+        [ "$ip" = "$cur" ] || continue
+        case " $domains " in *" $n "*) continue ;; esac
+        [ -f "$held" ] && awk -v n="$n" '$1 == n {f=1} END {exit !f}' "$held" && continue
+        nd_pin "$n" "$best"; echo "$n"
+      done | wc -l)
+    moved=$(echo $moved)
+    [ -f "$held" ] && awk -v a="$cur" -v b="$best" '$2 == a { $2 = b } { print }' "$held" > "$held.tmp" && mv "$held.tmp" "$held"
+  fi
   nd_commit
   rm -f "$bad" "$S/$name.dead.sent" "$S/$name.last_scan"
-  log "$name: SWITCHED $cur (${ms}ms) -> $best (${bestms}ms)"
+  log "$name: SWITCHED $cur (${ms}ms) -> $best (${bestms}ms)$([ "$moved" -gt 0 ] && echo ", other pins moved: $moved")"
   # ChatGPT's nodes die several times a day (seen on a real router: 4 switches a day): a switch that worked
   # is not worth a message; it is in the log and in the weekly digest. Claude's are rare: still reported
   [ "$name" = gpt ] || send "$(svc "$name") ($name): перешёл на более быстрый адрес — $(what "$cur") (${ms} мс) → $(what "$best") (${bestms} мс). Делать ничего не нужно."
@@ -262,7 +283,7 @@ if [ "$1" = --pin ]; then
   domains=""; for g in $GROUPS; do [ "${g%%:*}" = "$2" ] && domains=$(echo "${g#*:}" | tr ',' ' '); done
   [ -n "$domains" ] || { echo "нет группы $2"; exit 1; }
   if ai_away "$2"; then
-    echo "$2: сейчас путь выбирает резерв для нейросетей ($(cat __STATE__/ai-path/cur.$a)) — узел не меняю. Вернуть DNS-сервис: /ai → «Авто» или sh install.sh ai via dns"
+    echo "$2: сейчас путь выбирает резерв для нейросетей ($(ai_held)) — узел не меняю. Вернуть DNS-сервис: /ai → «Авто» или sh install.sh ai via dns"
     exit 1
   fi
   probe=${domains%% *}; want=$3
@@ -287,7 +308,7 @@ if [ "$1" = --pin ]; then
   exit 0
 fi
 for g in $GROUPS; do
-  if ai_away "${g%%:*}"; then log "${g%%:*}: the AI reserve holds it ($(cat __STATE__/ai-path/cur.$a)), skip"; continue; fi
+  if ai_away "${g%%:*}"; then log "${g%%:*}: the AI reserve holds it ($(ai_held)), skip"; continue; fi
   group "${g%%:*}" "$(echo "${g#*:}" | tr ',' ' ')"
 done
 exit 0
